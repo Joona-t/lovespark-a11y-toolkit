@@ -47,11 +47,11 @@ Canonical reference for every color token value, its purpose, contrast ratios, a
 |-------|-------|---------|----------------|
 | --ls-bg-pink-light | #F5EFE0 | Solid bg (no gradient) | Warm cream |
 | --ls-text-dark | #5C4A2A | Body text | 7.42:1 on bg — PASS |
-| --ls-text-muted | #6B5630 (cozy) / #8B6F47 (base) | Secondary text | cozy value: 5.53:1 on glass PASS. base value: lower — needs verification |
+| --ls-text-muted | #6B5630 | Secondary text | 5.53:1 on glass PASS, 5.09:1 on glass-strong PASS. (Was #8B6F47 which failed — fixed 2026-03-08 via KI-022) |
 | --ls-pink-accent | #C4806A | Decorative accent | DO NOT use as bg for white text (3.16:1 FAIL) |
 | --ls-focus-ring | #7A4A35 | Focus indicators | 6.4:1 on bg — excellent |
 | --ls-btn-hover-bg | #7A4A35 | Button hover bg | White on this: 7.35:1 PASS |
-| Title override | #3D5A2E | Header titles | 6.78:1 on bg, 6.14:1 on glass — PASS |
+| Title override | #3D5A2E | Header titles | 6.78:1 on bg, 6.14:1 on glass — PASS. (Was #4A7C59 which failed — fixed 2026-03-08 via KI-022) |
 | Glass (opaque) | #EDE4CE | Cards | text-dark: 6.72:1 PASS |
 
 **KNOWN ISSUE:** Hint text at opacity 0.8 drops to 4.26:1 on glass — FAIL. See KI-004.
@@ -66,7 +66,7 @@ Canonical reference for every color token value, its purpose, contrast ratios, a
 | --ls-pink-accent | #D4714E | Decorative accent | DO NOT use as bg for white text (3.35:1 FAIL) |
 | --ls-focus-ring | #D4714E | Focus indicators | 4.98:1 on bg, 2.65:1 on glass-border FAIL |
 | --ls-btn-hover-bg | #A04520 | Button hover bg | White on this: 6.24:1 PASS |
-| Title override | #E8926E | Header titles | 6.96:1 on bg, 6.4:1 on glass — PASS |
+| Title override | #D4714E | Header titles | 4.98:1 on bg, 4.58:1 on glass — PASS (matches base.css, same as pink_accent in slate) |
 | Glass (opaque) | #252525 | Cards | text-dark: 12.98:1 PASS |
 | Glass-strong (opaque) | #383838 | Selected states | text-muted: 4.17:1 FAIL (see KI-002) |
 

@@ -27,13 +27,14 @@ Present this as a table for review before proceeding.
 
 Use canonical component patterns from the accessibility framework (Section 4):
 
-- **Popup shell:** `role="alertdialog"`, `aria-labelledby`, `aria-describedby`, `lang="en"`
+- **Popup shell:** `role="dialog"` (NOT `alertdialog` — see KI-005), `aria-labelledby`, `aria-describedby`, `lang="en"`
 - **Toggles:** Hidden checkbox pattern with `aria-label`, `:focus-visible` on track
 - **Tabs:** Roving tabindex, `role="tablist/tab/tabpanel"`, `aria-selected`, `aria-controls`
-- **Dropdowns:** `aria-expanded`, `aria-haspopup`, `role="menu"`, `role="menuitem"`
+- **Dropdowns:** `aria-expanded`, `aria-haspopup="true"`, `role="menu"`, `role="menuitem"` — JS must toggle `aria-expanded` on open/close (KI-013)
 - **Sliders:** `aria-labelledby`, `aria-valuenow`, `aria-valuetext`
-- **Stats:** `aria-live="polite"` on dynamic values
-- **Buttons:** Visible text or `aria-label`, never empty
+- **Stats:** `aria-live="polite"` on dynamic values — but ONLY on meaningful status updates, NOT cosmetic rotating messages (KI-018)
+- **Buttons:** Visible text or `aria-label`, never empty. Emoji-only buttons MUST have `aria-label` — `title` alone is insufficient (KI-014)
+- **Inputs:** Every `<input>` and `<textarea>` MUST have `<label>` or `aria-label`. `placeholder` alone is insufficient (KI-016)
 
 Always include:
 - Sparky mascot with `alt="Sparky -- LoveSpark mascot"` and explicit width/height
@@ -139,7 +140,7 @@ After completing the build, run `/postmortem` to capture what was learned. This 
 **ALWAYS:**
 - --ls-focus-ring for focus indicators
 - --ls-text-dark for body text
-- role="alertdialog" on popup containers
+- role="dialog" on popup containers (NOT alertdialog — KI-005)
 - aria-label on icon-only controls
 - aria-expanded on toggle triggers
 - aria-live on dynamic content

@@ -2,25 +2,37 @@
 """LoveSpark Contrast Audit — WCAG 2.1 contrast checker for all 4 themes.
 
 Zero external dependencies. Uses relative luminance formula per WCAG 2.1.
-Data-oriented: theme colors and element mappings as flat dicts, no CSS parsing.
+Reads token values from canonical lovespark-base.css when available,
+falls back to hardcoded values otherwise.
 
 Features:
   --history: Save results and detect regressions between runs
+  --hardcoded: Skip CSS parsing, use hardcoded fallback values
   Persistent history at ~/.claude/docs/memory/contrast-history.json
 
 Usage:
     python3 audit-contrast.py [--theme THEME] [--verbose] [--json] [--history]
+    python3 audit-contrast.py --css /path/to/lovespark-base.css --verbose
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date
 
-# ── Theme Palettes ──────────────────────────────────────────────────────────
-# Token values from canonical lovespark-base.css + cozy-accessibility popup.css
-# Glass composites are pre-computed using worst-case (lightest) gradient point.
+# ── Canonical CSS Path ─────────────────────────────────────────────────────
+
+CSS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "Extensions", "infrastructure", "lovespark-shared-lib",
+    "lovespark-base.css"
+)
+
+# ── Theme Palettes (hardcoded fallbacks) ───────────────────────────────────
+# These serve as documentation AND fallback when CSS file isn't available.
+# CSS parser overrides these with live values from lovespark-base.css.
 
 THEMES = {
     "retro": {
@@ -32,13 +44,10 @@ THEMES = {
         "pink_accent":   (0xE8, 0x45, 0x7C),
         "focus_ring":    (0xD6, 0x34, 0x66),
         "btn_hover_bg":  (0xD6, 0x34, 0x66),
-        # Glass composites on worst-case bg (#FDCFE1)
-        # glass rgba(255,255,255,0.45) on (253,207,225)
         "glass_composite":        None,  # computed below
         "glass_strong_composite": None,
         "glass_border_composite": None,
         "glass_light_composite":  None,
-        # Raw glass values for compositing
         "_glass_rgb":   (255, 255, 255), "_glass_a": 0.45,
         "_glass_s_rgb": (255, 255, 255), "_glass_s_a": 0.6,
         "_glass_b_rgb": (255, 255, 255), "_glass_b_a": 0.4,
@@ -69,16 +78,15 @@ THEMES = {
         "bg_mid":        (0xF5, 0xEF, 0xE0),
         "bg_deep":       (0xED, 0xE4, 0xCE),
         "text_dark":     (0x5C, 0x4A, 0x2A),
-        "text_muted":    (0x6B, 0x56, 0x30),
+        "text_muted":    (0x6B, 0x56, 0x30),  # canonical base.css value
         "pink_accent":   (0xC4, 0x80, 0x6A),
         "focus_ring":    (0x7A, 0x4A, 0x35),
         "btn_hover_bg":  (0x7A, 0x4A, 0x35),
-        "title_override": (0x3D, 0x5A, 0x2E),
-        # Beige uses opaque glass values — no compositing needed
+        "title_override": (0x3D, 0x5A, 0x2E),  # canonical base.css value
         "glass_composite":        (0xED, 0xE4, 0xCE),
         "glass_strong_composite": (0xE5, 0xDB, 0xC4),
         "glass_border_composite": (0xD4, 0xC4, 0xA0),
-        "glass_light_composite":  None,  # rgba — needs compositing
+        "glass_light_composite":  None,
         "_glass_l_rgb": (237, 228, 206), "_glass_l_a": 0.6,
         "_worst_bg":    (0xF5, 0xEF, 0xE0),
     },
@@ -91,8 +99,7 @@ THEMES = {
         "pink_accent":   (0xD4, 0x71, 0x4E),
         "focus_ring":    (0xD4, 0x71, 0x4E),
         "btn_hover_bg":  (0xA0, 0x45, 0x20),
-        "title_override": (0xE8, 0x92, 0x6E),
-        # Slate uses opaque glass values
+        "title_override": (0xD4, 0x71, 0x4E),  # matches base.css (.theme-slate .header-title)
         "glass_composite":        (0x25, 0x25, 0x25),
         "glass_strong_composite": (0x38, 0x38, 0x38),
         "glass_border_composite": (0x4A, 0x4A, 0x4A),
@@ -104,6 +111,173 @@ THEMES = {
 WHITE = (255, 255, 255)
 KOFI_BG = (0xB9, 0x2D, 0x5D)
 DANGER_BG = (0xDC, 0x35, 0x45)
+
+# CSS variable → THEMES key mapping (simple hex-color tokens)
+VAR_MAP = {
+    "--ls-bg-pink-light": "bg_light",
+    "--ls-bg-pink-deep": "bg_deep",
+    "--ls-bg-pink": "bg_mid",
+    "--ls-text-dark": "text_dark",
+    "--ls-text-muted": "text_muted",
+    "--ls-pink-accent": "pink_accent",
+    "--ls-pink-deep": "pink_deep",
+}
+
+# Glass CSS variables → THEMES key mapping (rgba or hex)
+# (composite_key_prefix, raw_key_prefix)
+GLASS_VAR_MAP = {
+    "--ls-glass":        ("glass",        "_glass"),
+    "--ls-glass-strong": ("glass_strong", "_glass_s"),
+    "--ls-glass-border": ("glass_border", "_glass_b"),
+    "--ls-glass-light":  ("glass_light",  "_glass_l"),
+}
+
+
+# ── CSS Parser ─────────────────────────────────────────────────────────────
+
+def parse_hex_color(s):
+    """Parse '#RRGGBB' or '#rrggbb' to (R, G, B) tuple."""
+    s = s.strip()
+    m = re.match(r'^#([0-9a-fA-F]{6})$', s)
+    if m:
+        h = m.group(1)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    m = re.match(r'^#([0-9a-fA-F]{3})$', s)
+    if m:
+        h = m.group(1)
+        return (int(h[0]*2, 16), int(h[1]*2, 16), int(h[2]*2, 16))
+    return None
+
+
+def parse_rgba_value(s):
+    """Parse 'rgba(R, G, B, A)' to ((R, G, B), A)."""
+    s = s.strip()
+    m = re.match(
+        r'rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)', s
+    )
+    if m:
+        return (
+            (int(m.group(1)), int(m.group(2)), int(m.group(3))),
+            float(m.group(4)),
+        )
+    return None
+
+
+def parse_css_vars(block_text):
+    """Extract --ls-* variable declarations from a CSS block body."""
+    result = {}
+    for m in re.finditer(r'(--ls-[a-z-]+)\s*:\s*([^;]+);', block_text):
+        result[m.group(1)] = m.group(2).strip()
+    return result
+
+
+def parse_base_css(path, verbose=False):
+    """Parse lovespark-base.css and apply values to THEMES dict.
+
+    Returns the number of tokens overridden, or -1 if file not found.
+    """
+    if not os.path.exists(path):
+        return -1
+
+    with open(path) as f:
+        css = f.read()
+
+    # Parse CSS blocks
+    parsed_blocks = {}
+
+    # :root block → retro theme
+    root_match = re.search(r':root\s*\{([^}]+)\}', css)
+    if root_match:
+        parsed_blocks["retro"] = parse_css_vars(root_match.group(1))
+
+    # body.theme-{name} blocks
+    for theme in ("dark", "beige", "slate"):
+        m = re.search(rf'body\.theme-{theme}\s*\{{([^}}]+)\}}', css)
+        if m:
+            parsed_blocks[theme] = parse_css_vars(m.group(1))
+
+    # Title override selectors
+    title_overrides = {}
+    for m in re.finditer(
+        r'body\.theme-(beige|slate)\s+[^{]*\.header-title[^{]*\{[^}]*'
+        r'color:\s*([^;]+);',
+        css,
+    ):
+        color = parse_hex_color(m.group(2))
+        if color:
+            title_overrides[m.group(1)] = color
+
+    # Apply parsed values to THEMES
+    count = 0
+    mismatches = []
+
+    for theme_name, vars_dict in parsed_blocks.items():
+        if theme_name not in THEMES:
+            continue
+        t = THEMES[theme_name]
+
+        # Simple hex-color tokens
+        for css_var, key in VAR_MAP.items():
+            if css_var not in vars_dict:
+                continue
+            color = parse_hex_color(vars_dict[css_var])
+            if color is None:
+                continue
+            old = t.get(key)
+            if old and old != color:
+                mismatches.append(
+                    f"  {theme_name}.{key}: hardcoded {rgb_hex(old)}"
+                    f" -> CSS {rgb_hex(color)}"
+                )
+            t[key] = color
+            count += 1
+
+        # Glass tokens (rgba → compositing data, hex → direct composite)
+        for css_var, (comp_prefix, raw_prefix) in GLASS_VAR_MAP.items():
+            if css_var not in vars_dict:
+                continue
+            val = vars_dict[css_var]
+            comp_key = f"{comp_prefix}_composite"
+
+            hex_color = parse_hex_color(val)
+            if hex_color:
+                # Opaque glass — set composite directly
+                t[comp_key] = hex_color
+                count += 1
+                continue
+
+            rgba = parse_rgba_value(val)
+            if rgba:
+                rgb, alpha = rgba
+                t[f"{raw_prefix}_rgb"] = rgb
+                t[f"{raw_prefix}_a"] = alpha
+                t[comp_key] = None  # recomputed by compute_glass_composites
+                count += 1
+
+        # Update _worst_bg from bg_light (lightest gradient point)
+        if "bg_light" in t:
+            t["_worst_bg"] = t["bg_light"]
+
+    # Title overrides
+    for theme_name, color in title_overrides.items():
+        if theme_name not in THEMES:
+            continue
+        old = THEMES[theme_name].get("title_override")
+        if old and old != color:
+            mismatches.append(
+                f"  {theme_name}.title_override: hardcoded {rgb_hex(old)}"
+                f" -> CSS {rgb_hex(color)}"
+            )
+        THEMES[theme_name]["title_override"] = color
+        count += 1
+
+    if verbose and mismatches:
+        print("--- Token Value Drift (hardcoded vs canonical CSS) ---")
+        for m in mismatches:
+            print(m)
+        print()
+
+    return count
 
 
 # ── Contrast Math ───────────────────────────────────────────────────────────
@@ -117,7 +291,9 @@ def srgb_to_linear(v):
 def relative_luminance(rgb):
     """WCAG 2.1 relative luminance from (R, G, B) tuple."""
     r, g, b = rgb
-    return 0.2126 * srgb_to_linear(r) + 0.7152 * srgb_to_linear(g) + 0.0722 * srgb_to_linear(b)
+    return (0.2126 * srgb_to_linear(r)
+            + 0.7152 * srgb_to_linear(g)
+            + 0.0722 * srgb_to_linear(b))
 
 
 def contrast_ratio(fg, bg):
@@ -275,13 +451,13 @@ def load_history():
     return {"runs": []}
 
 
-def save_history(all_results, total_pass, total_fail):
+def save_history(all_results, total_pass, total_fail, source):
     """Save current run to history file."""
     history = load_history()
 
-    # Build compact snapshot
     snapshot = {
         "date": date.today().isoformat(),
+        "source": source,
         "total_pass": total_pass,
         "total_fail": total_fail,
         "failures": {},
@@ -291,7 +467,6 @@ def save_history(all_results, total_pass, total_fail):
         if fails:
             snapshot["failures"][theme_name] = fails
 
-    # Keep last 20 runs
     history["runs"].append(snapshot)
     history["runs"] = history["runs"][-20:]
 
@@ -339,7 +514,7 @@ def main():
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Show PASS results too (default: FAIL only)",
+        help="Show PASS results and token drift warnings",
     )
     parser.add_argument(
         "--json",
@@ -351,7 +526,30 @@ def main():
         action="store_true",
         help="Save results and detect regressions against last run",
     )
+    parser.add_argument(
+        "--css",
+        default=CSS_FILE,
+        help="Path to lovespark-base.css (default: canonical shared lib)",
+    )
+    parser.add_argument(
+        "--hardcoded",
+        action="store_true",
+        help="Skip CSS parsing, use hardcoded fallback values only",
+    )
     args = parser.parse_args()
+
+    # Parse CSS unless --hardcoded
+    source = "hardcoded"
+    if not args.hardcoded:
+        n = parse_base_css(args.css, verbose=args.verbose)
+        if n == -1:
+            if not args.json:
+                print(f"  CSS file not found: {args.css}")
+                print("  Using hardcoded fallback values.\n")
+        else:
+            source = f"css:{os.path.basename(args.css)}"
+            if not args.json:
+                print(f"  Loaded {n} token(s) from {args.css}\n")
 
     compute_glass_composites()
 
@@ -395,6 +593,7 @@ def main():
 
     if args.json:
         output = {
+            "source": source,
             "themes": all_results,
             "summary": {
                 "total_pass": total_pass,
@@ -438,10 +637,15 @@ def main():
 
         # Summary
         print("--- Summary ---")
+        print(f"  Source: {source}")
         for theme_name, results in all_results.items():
             theme_pass = sum(1 for r in results if r["pass"])
             theme_total = len(results)
-            print(f"  {theme_name.capitalize()}: {theme_pass}/{theme_total} pass", end="")
+            print(
+                f"  {theme_name.capitalize()}: "
+                f"{theme_pass}/{theme_total} pass",
+                end="",
+            )
             if theme_pass < theme_total:
                 print(f" | {theme_total - theme_pass} FAILURES", end="")
             print()
@@ -453,7 +657,7 @@ def main():
 
     # Save history
     if args.history:
-        save_history(all_results, total_pass, total_fail)
+        save_history(all_results, total_pass, total_fail, source)
         if not args.json:
             print(f"\n  History saved to {HISTORY_PATH}")
 

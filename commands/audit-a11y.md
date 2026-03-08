@@ -9,6 +9,25 @@ Before auditing, read the persistent knowledge base to check for known recurring
 
 Flag any known issues found immediately — these are RECURRENCES and must be fixed first.
 
+## Step 0b: Dangerous Pairing Grep (MANDATORY)
+
+Before even running the contrast tool, grep the project's CSS and JS for known dangerous pairings from color-decisions.md:
+
+1. Grep CSS files for `--ls-pink-accent` used as `background` with white/light text — this is KI-001, fails in ALL themes
+2. Grep CSS files for `opacity: 0.[0-7]` on text elements — KI-004 risk in beige theme
+3. Grep JS files for both `storage.sync` and `storage.local` — KI-012, causes total feature failure
+4. Grep JS files for `classList.toggle('open')` or `classList.add('open')` — check matching `setAttribute('aria-expanded')` exists (KI-013)
+5. Grep HTML files for `<button` with emoji-only or symbol-only text (×, ▾, etc.) — verify `aria-label` present (KI-014)
+6. Grep JS files for `.textContent =` — verify target element has `aria-live` attribute if it's a status/counter element. But NOT cosmetic rotating messages (KI-015 + KI-018)
+7. Grep HTML files for `<input` and `<textarea` without `aria-label` or matching `<label>` — (KI-016)
+8. Grep JS files for `innerHTML` — flag as XSS risk, must use `textContent` or DOM API (KI-011)
+9. Grep background.js/service-worker.js for `setTimeout` — flag any that defer storage writes (KI-020)
+10. Grep background.js/service-worker.js for `catch` with empty body `{}` — must log errors (KI-021)
+11. Grep JS files for `onRuleMatchedDebug` used as if-guard — flag as packed extension bug (KI-019)
+12. Grep CSS files for `outline: none` — verify every match has a corresponding `:focus-visible` with replacement outline (KI-006)
+
+Flag any matches as KNOWN DANGEROUS PATTERNS before proceeding.
+
 ## Step 1: Contrast Audit
 
 Run the automated contrast checker with history tracking:
@@ -23,7 +42,7 @@ Report results. If there are failures, list specific token fixes needed.
 
 Search the project's HTML files for required ARIA patterns. Check for:
 
-- `role="alertdialog"` on popup container with `aria-labelledby` and `aria-describedby`
+- `role="dialog"` on popup container with `aria-labelledby` (NOT `alertdialog` — that's for destructive confirm dialogs only)
 - `aria-label` on every interactive element without visible text (buttons with only icons/emoji)
 - `aria-expanded` on buttons that toggle dropdowns or panels
 - `aria-haspopup` on dropdown triggers
