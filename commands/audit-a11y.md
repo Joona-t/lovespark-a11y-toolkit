@@ -25,6 +25,8 @@ Before even running the contrast tool, grep the project's CSS and JS for known d
 10. Grep background.js/service-worker.js for `catch` with empty body `{}` — must log errors (KI-021)
 11. Grep JS files for `onRuleMatchedDebug` used as if-guard — flag as packed extension bug (KI-019)
 12. Grep CSS files for `outline: none` — verify every match has a corresponding `:focus-visible` with replacement outline (KI-006)
+13. Grep JS files for `.matchedRules` — should be `.rulesMatchedInfo`. Wrong Chrome API property name silently returns undefined, counter stays at 0 in packed builds (KI-023)
+14. For each setting that is saved AND loaded, verify both paths use the same storage key. If save writes to `"theme"` but load reads from `"ls_prefs"`, settings silently revert (KI-017)
 
 Flag any matches as KNOWN DANGEROUS PATTERNS before proceeding.
 
