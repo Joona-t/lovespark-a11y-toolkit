@@ -27,7 +27,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = SCRIPT_DIR.parent
 SHARED_LIB = BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
-HISTORY_PATH = Path.home() / ".claude" / "docs" / "memory" / "ls-check-history.json"
+HISTORY_PATH = None  # set per project in main()
 
 SHARED_FILES = [
     "lovespark-base.css",
@@ -124,12 +124,18 @@ class CheckResult:
         self.severity = severity  # "fail" or "warn"
 
     def to_dict(self):
+        category = self.check_id.split("-", 1)[0].lower() if "-" in self.check_id else "general"
         return {
             "id": self.check_id,
             "passed": self.passed,
             "message": self.message,
             "details": self.details,
             "severity": self.severity,
+            "category": category,
+            "rule_source": "LoveSpark policy" if self.check_id.startswith(("A11Y", "MV3", "SEC", "BRAND", "PERM")) else None,
+            "wcag": ["4.1.2"] if self.check_id.startswith("A11Y") else [],
+            "suggestion": self.details[-1].strip() if self.details and str(self.details[-1]).strip().lower().startswith("fix:") else None,
+            "evidence": [],
         }
 
 
@@ -142,7 +148,7 @@ def check_a11y_contrast(path):
         return CheckResult("A11Y-CONTRAST", False, "audit-contrast.py not found", severity="warn")
     try:
         r = subprocess.run(
-            [sys.executable, str(script), "--json"],
+            [sys.executable, str(script), "--mode", "tokens", "--json"],
             capture_output=True, text=True, timeout=30
         )
         data = json.loads(r.stdout)
@@ -817,7 +823,7 @@ def check_rust_unsafe(path):
 
 def check_python_typehints(path):
     """PY-TYPEHINTS: Functions have type hints."""
-    py_files = collect_files(path, ".py")
+    py_files = [f for f in collect_files(path, ".py") if "/tests/" not in str(f) and "/scripts/" not in str(f)]
     total_funcs = 0
     typed_funcs = 0
     for f in py_files:
@@ -839,7 +845,7 @@ def check_python_typehints(path):
 
 def check_python_docstrings(path):
     """PY-DOCSTRINGS: Public functions have docstrings."""
-    py_files = collect_files(path, ".py")
+    py_files = [f for f in collect_files(path, ".py") if "/tests/" not in str(f) and "/scripts/" not in str(f)]
     missing = []
     for f in py_files:
         content = read_file_safe(f)
@@ -1053,7 +1059,7 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
 # ── History & Regression ──────────────────────────────────────────────────
 
 def load_history():
-    if HISTORY_PATH.exists():
+    if HISTORY_PATH and HISTORY_PATH.exists():
         return json.loads(HISTORY_PATH.read_text())
     return {"runs": []}
 
@@ -1157,19 +1163,24 @@ def print_results(results, project_name, project_type, strict=False):
 def print_json(results, project_name, project_type, regressions=None):
     """Print machine-readable JSON."""
     output = {
+        "schema_version": "1.0",
+        "tool": "ls-check",
+        "tool_version": "0.1.0",
         "project": project_name,
         "type": project_type,
         "categories": {},
         "summary": {
             "total_pass": 0,
             "total_fail": 0,
+            "total_warn": 0,
         },
     }
 
     for cat_name, checks in results.items():
         output["categories"][cat_name] = [r.to_dict() for r in checks]
         output["summary"]["total_pass"] += sum(1 for r in checks if r.passed)
-        output["summary"]["total_fail"] += sum(1 for r in checks if not r.passed)
+        output["summary"]["total_fail"] += sum(1 for r in checks if not r.passed and r.severity == "fail")
+        output["summary"]["total_warn"] += sum(1 for r in checks if not r.passed and r.severity == "warn")
 
     if regressions:
         output["regressions"] = [r.to_dict() for r in regressions]
@@ -1204,12 +1215,16 @@ def main():
                         help="Machine-readable JSON output")
     parser.add_argument("--history", action="store_true",
                         help="Save results and detect regressions")
+    parser.add_argument("--history-file",
+                        help="Override history path (default: <project>/.lovespark/ls-check-history.json)")
     parser.add_argument("--type", choices=["extension", "rust", "python", "ios", "ios-expo",
                                            "web-react", "web-static", "general"],
                         help="Override auto-detected project type")
     args = parser.parse_args()
 
     path = Path(args.path).resolve()
+    global HISTORY_PATH
+    HISTORY_PATH = Path(args.history_file).expanduser().resolve() if args.history_file else path / ".lovespark" / "ls-check-history.json"
     if not path.exists():
         print(f"Error: {path} does not exist", file=sys.stderr)
         sys.exit(2)

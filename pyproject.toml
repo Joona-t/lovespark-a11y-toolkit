@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lovespark-a11y-toolkit"
+version = "0.1.0"
+description = "LoveSpark accessibility, contrast, and agent-ready quality gates."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Joona"}]
+
+[project.scripts]
+ls-check = "lovespark_a11y_toolkit.cli:ls_check_main"
+ls-audit-contrast = "lovespark_a11y_toolkit.cli:audit_contrast_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lovespark_a11y_toolkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

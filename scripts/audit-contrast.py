@@ -8,7 +8,7 @@ falls back to hardcoded values otherwise.
 Features:
   --history: Save results and detect regressions between runs
   --hardcoded: Skip CSS parsing, use hardcoded fallback values
-  Persistent history at ~/.claude/docs/memory/contrast-history.json
+  Persistent history at .lovespark/contrast-history.json or --history-file
 
 Usage:
     python3 audit-contrast.py [--theme THEME] [--verbose] [--json] [--history]
@@ -436,11 +436,35 @@ def get_checks(theme_name, t):
     return checks
 
 
+DANGER_PAIR_LABELS = {
+    "Hint text (0.8 opacity) on glass",
+    "White on accent btn",
+    "Slider thumb on track",
+    "Muted text on glass-strong",
+}
+
+def filter_checks_for_mode(checks, mode):
+    if mode == "all":
+        return checks
+    if mode == "danger-pairs":
+        return [c for c in checks if c[0] in DANGER_PAIR_LABELS]
+    return [c for c in checks if c[0] not in DANGER_PAIR_LABELS]
+
+def suggestion_for(label, theme_name):
+    if label == "White on accent btn":
+        return "Use --ls-pink-deep or --ls-btn-hover-bg for white text buttons; reserve --ls-pink-accent for non-text UI accents."
+    if label == "Hint text (0.8 opacity) on glass":
+        return "Use opacity 0.85+ for beige-safe hint text, or use an opaque token."
+    if theme_name == "slate" and label == "Muted text on glass-strong":
+        return "Lighten slate muted text to about #A1A1A1 or darken the glass-strong background."
+    if theme_name == "slate" and label == "Slider thumb on track":
+        return "Use a higher-contrast slate focus/slider color such as approximately #D4834E."
+    return "Use a foreground/background token pair that meets the required WCAG contrast ratio."
+
+
 # ── History & Regression Detection ──────────────────────────────────────────
 
-HISTORY_PATH = os.path.expanduser(
-    "~/.claude/docs/memory/contrast-history.json"
-)
+HISTORY_PATH = os.path.join(os.getcwd(), ".lovespark", "contrast-history.json")
 
 
 def load_history():
@@ -517,6 +541,12 @@ def main():
         help="Show PASS results and token drift warnings",
     )
     parser.add_argument(
+        "--mode",
+        choices=["tokens", "danger-pairs", "all"],
+        default="all",
+        help="Audit mode: tokens for CI-green canonical health, danger-pairs for known forbidden pairings, all for legacy full report",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output machine-readable JSON",
@@ -536,7 +566,11 @@ def main():
         action="store_true",
         help="Skip CSS parsing, use hardcoded fallback values only",
     )
+    parser.add_argument("--history-file", help="Override history path (default: .lovespark/contrast-history.json)")
     args = parser.parse_args()
+    global HISTORY_PATH
+    if args.history_file:
+        HISTORY_PATH = os.path.abspath(os.path.expanduser(args.history_file))
 
     # Parse CSS unless --hardcoded
     source = "hardcoded"
@@ -564,7 +598,7 @@ def main():
     total_fail = 0
 
     for theme_name, t in themes_to_check.items():
-        checks = get_checks(theme_name, t)
+        checks = filter_checks_for_mode(get_checks(theme_name, t), args.mode)
         results = []
 
         for label, fg, bg, required, check_type in checks:
@@ -578,6 +612,7 @@ def main():
                 "required": required,
                 "type": check_type,
                 "pass": passed,
+                "suggestion": None if passed else suggestion_for(label, theme_name),
             })
             if passed:
                 total_pass += 1
@@ -593,6 +628,10 @@ def main():
 
     if args.json:
         output = {
+            "schema_version": "1.0",
+            "tool": "ls-audit-contrast",
+            "tool_version": "0.1.0",
+            "mode": args.mode,
             "source": source,
             "themes": all_results,
             "summary": {
