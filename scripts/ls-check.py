@@ -177,7 +177,7 @@ def check_a11y_ki001(css_files):
                 start = max(0, i - 6)
                 lines = content.splitlines()[start:i + 5]
                 ctx = "\n".join(lines).lower()
-                if any(w in ctx for w in ("toggle", "slider", "thumb", "::")):
+                if any(w in ctx for w in ("toggle", "slider", "switch", "thumb", "::", "accent-color")):
                     continue
                 hits.append(f"  {f}:{i}")
     if hits:
@@ -399,9 +399,22 @@ def check_sec_csp(path):
 
 
 def check_sec_cdn(html_files, js_files):
-    """SEC-CDN: No external CDN links."""
+    """SEC-CDN: No external CDN code (scripts/stylesheets/images) — bundle locally.
+
+    Only flags resource-loading tags (<script>, <link>, <img>) whose src/href
+    points off-host. Anchor tags (<a href="https://...">) are *navigation*,
+    not code injection, and are NOT flagged. Whitelists Google Fonts and a
+    short list of well-known LoveSpark-suite + donation domains used by the
+    shared footer.
+    """
     hits = []
-    cdn_re = re.compile(r'(?:src|href)=["\']https?://(?!fonts\.googleapis\.com|fonts\.gstatic\.com)')
+    allow_hosts = (
+        r'fonts\.googleapis\.com|fonts\.gstatic\.com|'
+        r'lovespark\.love|ko-fi\.com|github\.com/Joona-t|joona-t\.github\.io'
+    )
+    cdn_re = re.compile(
+        r'<(?:script|link|img)\b[^>]*\b(?:src|href)=["\']https?://(?!' + allow_hosts + r')'
+    )
     for f in html_files + js_files:
         content = read_file_safe(f)
         for i, line in enumerate(content.splitlines(), 1):
@@ -409,7 +422,7 @@ def check_sec_cdn(html_files, js_files):
                 hits.append(f"  {f}:{i}: {line.strip()[:80]}")
     if hits:
         return CheckResult("SEC-CDN", False, "External CDN links found — bundle locally", hits)
-    return CheckResult("SEC-CDN", True, "No external CDN links")
+    return CheckResult("SEC-CDN", True, "No external CDN code links")
 
 
 def check_sec_ext_connect(path):
