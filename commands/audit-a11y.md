@@ -1,3 +1,8 @@
+---
+description: Comprehensive 8-step accessibility audit on a LoveSpark extension or UI project
+sideEffect: read
+---
+
 Perform a comprehensive accessibility audit on the current LoveSpark extension or UI project. The working directory should contain the extension's HTML, CSS, and JS files.
 
 ## Step 0: Load Memory (MANDATORY)

@@ -1,3 +1,8 @@
+---
+description: Capture learnings after a build/review/debug session; updates knowledge base
+sideEffect: write
+---
+
 After completing a build, review, or debug session, capture what was learned and update the persistent knowledge base so future sessions don't repeat mistakes.
 
 ## Step 1: Gather Context
@@ -33,6 +38,15 @@ If any debugging insights were gained:
 If any new reusable patterns were established:
 - Read `~/.claude/docs/memory/patterns.md`
 - Add new Pattern entries with Used in/When/Implementation/Notes
+
+## Step 5.5: Scan for Forge Candidates
+
+Check if `session-memory.md` exists in the current project directory. If it does, grep for lines matching `FORGE CANDIDATE:`. For each match:
+- Present the candidate name and purpose to the user
+- Ask if they want to invoke `/forge-skill` to create it now
+- If yes, invoke `/forge-skill <name> <scope> "<purpose>"` with the extracted details
+
+If no session-memory.md exists or no FORGE CANDIDATE entries are found, skip this step silently.
 
 ## Step 6: Flag Tool Improvements
 

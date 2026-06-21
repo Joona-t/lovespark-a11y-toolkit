@@ -1,3 +1,8 @@
+---
+description: Recursively improve LoveSpark tools by reviewing against accumulated known issues
+sideEffect: write
+---
+
 Recursively improve existing LoveSpark tools and skills by reviewing them against accumulated knowledge in the memory system. This is how our tools get smarter over time.
 
 ## Step 1: Read Current Knowledge

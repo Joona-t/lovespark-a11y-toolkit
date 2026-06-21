@@ -634,3 +634,15 @@ When you encounter a new issue during a build or review:
 **Category:** SwiftUI / macOS+iOS apps · **Found:** 2026-06-12, Tongue v0.5.19 guided session
 **Symptom:** second kana unit's learn flow opened at card 5/5 — the previous unit's `@State index` survived because back-to-back `.kanaUnit` payloads rendered `KanaLearnView` at the same position in the view tree, so SwiftUI treated them as the same view. Items were nearly marked "introduced" without ever being displayed.
 **Prevention rule:** any view holding internal `@State` that can be re-rendered with a *different payload* at the *same structural position* (sequences of intro cards, wizards, per-item editors in a switch) MUST take an explicit `.id(payload.id)` at the call site. Snapshot checks don't catch this — only live sequential interaction does; include a back-to-back-payload step in GUI walkthroughs.
+
+
+## KI-037 — Swift synthesized Codable does NOT backfill property defaults — schema growth = silent data loss
+**Category:** Swift / persistence / macOS+iOS apps · **Found:** 2026-06-12, Tongue v0.5.27 (caught by the walkthrough backup protocol)
+**Symptom:** after adding new non-optional fields (with defaults) to a persisted Codable struct, blobs written by the previous schema fail to decode (missing key) → the loader returns nil → the init path silently writes a FRESH state over the user's file. Total data loss; no crash, no error surfaced.
+**Root cause:** synthesized `init(from:)` uses `decode` (required) for non-optional properties — Swift property defaults are IGNORED during decoding. "Codable backfills defaults" is only true for Optionals.
+**Prevention rule:**
+1. Any persisted Codable struct that grows fields MUST get a hand-written `init(from:)` using `decodeIfPresent ?? default` — declared in an EXTENSION so memberwise inits survive. Encoding stays synthesized.
+2. Migration canary tests MUST decode key-STRIPPED fixtures (simulate real old blobs). A fixture encoded from the current struct always contains every key and proves nothing.
+3. Any loader that can fall back to "fresh state" MUST first preserve an existing-but-unreadable state file aside (`state.json.unreadable-<ts>`) — never silently overwrite.
+4. Back up live state before GUI walkthroughs (this rule converted a P0 data loss into a non-event).
+5. Never replace a running app's binary in place — quit the process first (in-place replacement also produced silent no-output executions).

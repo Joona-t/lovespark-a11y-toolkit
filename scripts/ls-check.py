@@ -726,6 +726,7 @@ def check_perm_missing(path, js_files):
         return CheckResult("PERM-MISSING", True, "Could not parse manifest.json")
 
     perms = set(data.get("permissions", []))
+    host_perms = data.get("host_permissions", [])
     all_js = "\n".join(read_file_safe(f) for f in js_files)
 
     api_perm_map = {
@@ -740,9 +741,16 @@ def check_perm_missing(path, js_files):
         "chrome.scripting": "scripting",
     }
 
+    # chrome.tabs.* metadata (url/title) is granted by `tabs`, by `activeTab` (popup gesture),
+    # or by any host permission. Treat those as satisfying the `tabs` requirement so the check
+    # doesn't steer extensions toward the broader, CWS-scrutinized `tabs` permission. (LS-1)
+    tabs_satisfied = "activeTab" in perms or bool(host_perms)
+
     missing = []
     for api, perm in api_perm_map.items():
         if api in all_js and perm not in perms:
+            if perm == "tabs" and tabs_satisfied:
+                continue
             missing.append(f"  '{api}' used but '{perm}' not in permissions")
 
     if missing:

@@ -1,3 +1,8 @@
+---
+description: Guide building an accessible LoveSpark UI from scratch with a11y framework loaded
+sideEffect: write
+---
+
 Guide building an accessible LoveSpark UI from scratch. Load the accessibility framework first, then follow each step.
 
 ## Step 0: Load Framework + Memory (MANDATORY)
