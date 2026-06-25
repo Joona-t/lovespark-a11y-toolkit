@@ -27,10 +27,24 @@ export const meta = {
   ],
 }
 
+const SENTINEL = 'NO EVIDENCE PASSED'
 const EVIDENCE =
   (args && args.evidence) ||
-  'NO EVIDENCE PASSED. Pass args.evidence: a string with (1) the user\'s verbatim corrections / frustration signals and (2) the observed agent failures (claim vs reality) for the run being audited. Without it this audit cannot run.'
+  SENTINEL + '. Pass args.evidence: a string with (1) the user\'s verbatim corrections / frustration signals and (2) the observed agent failures (claim vs reality) for the run being audited. Without it this audit cannot run.'
 const THREAD = (args && args.thread) || 'untitled run'
+
+// PRE-SPAWN EVIDENCE GUARD (ITER: caught by an audit that fanned out against the sentinel).
+// Workflow scripts have NO filesystem access, and args.evidence does NOT reliably bind when this
+// file is invoked via {scriptPath, args} — so evidence must be EMBEDDED inline (author the audit
+// as an inline `script` with EVIDENCE filled in) or reliably passed. Fail fast here rather than
+// spawning auditors against an empty pack (which wastes a full run and risks a hollow ledger entry).
+if (!EVIDENCE || EVIDENCE.includes(SENTINEL) || EVIDENCE.replace(/\s/g, '').length < 200) {
+  throw new Error(
+    'thread-audit-ledger: evidence pack missing/empty (' + (EVIDENCE || '').length + ' chars). ' +
+    'args.evidence did not bind. EMBED the evidence inline in the script (preferred — see /audit-ledger), ' +
+    'or pass a non-empty args.evidence. Refusing to spawn auditors against an empty pack.'
+  )
+}
 
 const DIMENSIONS = [
   { key: 'verification', brief: 'Premature completion claims — declaring a task done/fixed without verifying it on the ACTUAL failing case the user named (e.g. the worst frame).' },

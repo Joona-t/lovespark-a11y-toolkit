@@ -15,13 +15,11 @@ Run a multi-agent audit of the run/implementation that just finished, and append
    - A one-line `thread` label (project + date).
 
 2. **Run the audit workflow** (no paid API; local subagents). With the keyword `ultracode` present or multi-agent opted in:
+   **EMBED the evidence inline** — author the audit as an inline `script` with the evidence pack baked into the `EVIDENCE` const (copy the structure of `workflows/thread-audit-ledger.js`). Do **NOT** rely on `{scriptPath, args}` — Workflow scripts have no filesystem access and `args.evidence` does **not** reliably bind via `scriptPath`, so the auditors silently receive the `NO EVIDENCE PASSED` sentinel and the whole run is wasted (learned the hard way; the script now has a pre-spawn guard that throws on an empty pack, but inline embedding is the fix).
    ```
-   Workflow({
-     scriptPath: "<repo>/workflows/thread-audit-ledger.js",
-     args: { thread: "<label>", evidence: "<the evidence pack string>" }
-   })
+   Workflow({ script: "export const meta = {...}\nconst EVIDENCE = `<the evidence pack>`\n... (5 dimension-auditors → skeptic → synthesizer)" })
    ```
-   It fans out 5 dimension-auditors (verification / honesty-trust / process-DOTS / rootcause-memory / tooling-gaps) → a **skeptic** dedups and drops overclaims → a **synthesizer** returns `{ ledger_markdown, prevention_rules, system_backlog, verdict_line }`.
+   It fans out 5 dimension-auditors (verification / honesty-trust / process-DOTS / rootcause-memory / tooling-gaps) → a **skeptic** dedups and drops overclaims → a **synthesizer** returns `{ ledger_markdown, prevention_rules, system_backlog, verdict_line }`. For a clean run, tell the auditors NOT to manufacture failures to fill a quota.
 
 3. **Prepend the entry** to `ledger/AGENT-AUDIT-LEDGER.md` (newest on top): an H2 `## <date> — <thread>`, then `ledger_markdown`, then the prevention-rules list and the system-backlog table.
 
