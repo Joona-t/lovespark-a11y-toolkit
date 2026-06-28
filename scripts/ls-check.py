@@ -29,6 +29,27 @@ BASE_DIR = SCRIPT_DIR.parent
 SHARED_LIB = BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
 HISTORY_PATH = None  # set per project in main()
 
+# Tool identity. Keep in lockstep with pyproject [project].version. `ls-check
+# --version` prints this plus a sha256 of THIS file, so you can confirm which
+# build is installed and detect a stale console script (compare the installed
+# hash against the toolkit repo's HEAD scripts/ls-check.py). See KI-LS1.
+TOOL_VERSION = "0.1.1"
+
+
+def _version_string():
+    """Identity line for stale-install detection.
+
+    Format: 'ls-check <ver>  sha256:<12hex>  source:<path>'. The hash is computed
+    from this file's own bytes at runtime, so it pins the exact installed build.
+    """
+    src = Path(__file__).resolve()
+    try:
+        digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+    except OSError:
+        digest = "unknown"
+    return f"ls-check {TOOL_VERSION}  sha256:{digest}  source:{src}"
+
+
 SHARED_FILES = [
     "lovespark-base.css",
     "lovespark-stats.js",
@@ -726,6 +747,7 @@ def check_perm_missing(path, js_files):
         return CheckResult("PERM-MISSING", True, "Could not parse manifest.json")
 
     perms = set(data.get("permissions", []))
+    host_perms = data.get("host_permissions", [])
     all_js = "\n".join(read_file_safe(f) for f in js_files)
 
     api_perm_map = {
@@ -740,9 +762,16 @@ def check_perm_missing(path, js_files):
         "chrome.scripting": "scripting",
     }
 
+    # chrome.tabs.* metadata (url/title) is granted by `tabs`, by `activeTab` (popup gesture),
+    # or by any host permission. Treat those as satisfying the `tabs` requirement so the check
+    # doesn't steer extensions toward the broader, CWS-scrutinized `tabs` permission. (LS-1)
+    tabs_satisfied = "activeTab" in perms or bool(host_perms)
+
     missing = []
     for api, perm in api_perm_map.items():
         if api in all_js and perm not in perms:
+            if perm == "tabs" and tabs_satisfied:
+                continue
             missing.append(f"  '{api}' used but '{perm}' not in permissions")
 
     if missing:
@@ -1178,7 +1207,7 @@ def print_json(results, project_name, project_type, regressions=None):
     output = {
         "schema_version": "1.0",
         "tool": "ls-check",
-        "tool_version": "0.1.0",
+        "tool_version": TOOL_VERSION,
         "project": project_name,
         "type": project_type,
         "categories": {},
@@ -1233,7 +1262,13 @@ def main():
     parser.add_argument("--type", choices=["extension", "rust", "python", "ios", "ios-expo",
                                            "web-react", "web-static", "general"],
                         help="Override auto-detected project type")
+    parser.add_argument("--version", action="store_true",
+                        help="Print version + content hash (stale-install detection) and exit")
     args = parser.parse_args()
+
+    if args.version:
+        print(_version_string())
+        sys.exit(0)
 
     path = Path(args.path).resolve()
     global HISTORY_PATH
