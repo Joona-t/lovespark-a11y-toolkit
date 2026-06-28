@@ -119,3 +119,73 @@ def test_ls_check_version_flag_emits_hash():
     assert result.returncode == 0
     assert result.stdout.startswith("ls-check ")
     assert "sha256:" in result.stdout
+
+
+def _write_ext_manifest(tmp_path, **overrides):
+    manifest = {
+        "manifest_version": 3,
+        "name": "demo",
+        "version": "1.0",
+    }
+    manifest.update(overrides)
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_a11y_ki004_exempts_disabled_and_hover_states(tmp_path):
+    # KI-LS1 follow-up regression: A11Y-KI004 must only flag DEFAULT-STATE low opacity.
+    # Disabled / hover / focus controls are EXPECTED to dim (WCAG 1.4.3 disabled
+    # exemption) and must NOT be flagged. Mirrors the EXEMPT-states selector tracking
+    # ported from canonical. Default-state low opacity must still be caught (positive
+    # control), so a future "disable the whole check" regression can't pass this test.
+    _write_ext_manifest(tmp_path)
+    (tmp_path / "popup.css").write_text(
+        ".normal-text { opacity: 0.55; }\n"
+        ".btn:disabled { opacity: 0.4; }\n"
+        ".reveal:hover { opacity: 0.3; }\n"
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
+    assert "opacity: 0.55" in result.stdout, result.stdout      # default state still flagged
+    assert "opacity: 0.4" not in result.stdout, result.stdout   # :disabled exempt
+    assert "opacity: 0.3" not in result.stdout, result.stdout   # :hover exempt
+
+
+def test_mv3_storage_key_accepts_defaulted_and_computed_keys(tmp_path):
+    # KI-LS1 follow-up regression: MV3-STORAGE-KEY must treat keys persisted via the
+    # shared lifecycle as SET — ES6 shorthand set({streak}), the DEFAULTS object literal,
+    # createAccumulator(today,total), and lastResetDate/checkDailyReset. Without the port
+    # every defaulted/computed key false-flags as "read but never set". A genuinely-unset
+    # read key (genuinelyMissing) is the positive control: it must still be the SOLE key
+    # reported, which only holds when all the lifecycle keys are correctly seen as set.
+    _write_ext_manifest(tmp_path)
+    (tmp_path / "popup.js").write_text(
+        "const DEFAULTS = { theme: 'retro', enabled: true };\n"
+        "const acc = createAccumulator('todayCount', 'totalCount');\n"
+        "function checkDailyReset() {}\n"
+        "function persist(streak) { chrome.storage.local.set({ streak }); }\n"
+        "chrome.storage.local.set({ score: 0 });\n"
+        "chrome.storage.local.get(['theme', 'enabled', 'streak', 'todayCount', "
+        "'totalCount', 'lastResetDate', 'score', 'genuinelyMissing'], () => {});\n"
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
+    # If the lifecycle keys were correctly seen as set, the only "read but never set"
+    # key is genuinelyMissing — a substring that does NOT survive if the other keys leak in.
+    assert "Read but never set: genuinelyMissing" in result.stdout, result.stdout
+
+
+def test_perm_unused_exempts_declarativenetrequest_via_manifest_key(tmp_path):
+    # KI-LS1 follow-up regression: declarativeNetRequest can be purely declarative via the
+    # static `declarative_net_request` manifest key (no JS reference). PERM-UNUSED must not
+    # flag it. A genuinely unused permission (alarms) is the positive control — it must
+    # still be flagged so the exemption can't silently neuter the whole check.
+    _write_ext_manifest(
+        tmp_path,
+        permissions=["declarativeNetRequest", "alarms"],
+        declarative_net_request={
+            "rule_resources": [
+                {"id": "ruleset", "enabled": True, "path": "rules.json"}
+            ]
+        },
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
+    assert "'declarativeNetRequest' declared but" not in result.stdout, result.stdout
+    assert "'alarms' declared but" in result.stdout, result.stdout
