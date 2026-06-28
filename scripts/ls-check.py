@@ -33,7 +33,7 @@ HISTORY_PATH = None  # set per project in main()
 # --version` prints this plus a sha256 of THIS file, so you can confirm which
 # build is installed and detect a stale console script (compare the installed
 # hash against the toolkit repo's HEAD scripts/ls-check.py). See KI-LS1.
-TOOL_VERSION = "0.1.1"
+TOOL_VERSION = "0.1.2"
 
 
 def _version_string():
@@ -209,16 +209,36 @@ def check_a11y_ki001(css_files):
 
 
 def check_a11y_ki004(css_files):
-    """A11Y-KI004: No opacity < 0.85 on text in beige theme."""
+    """A11Y-KI004: No opacity < 0.85 on DEFAULT-STATE text in beige theme.
+
+    Skips transient/interactive states (:disabled, :hover, :focus, :active) and
+    decorative state classes. Disabled controls and hover-reveal affordances are
+    EXPECTED to dim and are exempt from text-contrast (WCAG 1.4.3 disabled
+    exemption). Without this, the rule false-flags every standard dim-on-disable.
+    """
+    EXEMPT = (':disabled', '[disabled]', ':hover', ':focus', ':active',
+              'reading-done', 'reading-active', 'placeholder', '::before',
+              '::after', '::placeholder')
     hits = []
     for f in css_files:
         content = read_file_safe(f)
+        current_selector = ''
+        sel_buf = ''
         for i, line in enumerate(content.splitlines(), 1):
+            # selector tracking (opacity always sits inside the block opened by `{`)
+            if '{' in line:
+                current_selector = (sel_buf + ' ' + line.split('{', 1)[0]).strip()
+                sel_buf = ''
             m = re.search(r'opacity:\s*(0\.\d+)', line)
-            if m:
-                val = float(m.group(1))
-                if val < 0.85:
-                    hits.append(f"  {f}:{i} opacity: {val}")
+            if m and float(m.group(1)) < 0.85:
+                if not any(e in current_selector for e in EXEMPT):
+                    hits.append(f"  {f}:{i} opacity: {m.group(1)}  (selector: {current_selector[:48]})")
+            if '}' in line:
+                current_selector = ''
+                sel_buf = ''
+            elif '{' not in line and current_selector == '':
+                # between rules — accumulate a possibly multi-line selector
+                sel_buf = (sel_buf + ' ' + line.strip()).strip()
     if hits:
         return CheckResult("A11Y-KI004", False,
                            "Low opacity on text (fails in beige theme)", hits, severity="warn")
@@ -532,11 +552,35 @@ def check_mv3_storage_key(js_files):
     for f in js_files:
         content = read_file_safe(f)
         for m in re.finditer(r'storage\.local\.set\(\s*\{([^}]+)\}', content):
-            for k in re.findall(r"(\w+)\s*:", m.group(1)):
+            body = m.group(1)
+            for k in re.findall(r"(\w+)\s*:", body):
                 set_keys.add(k)
+            # ES6 shorthand: set({ theme }) — lone identifiers without colons
+            for k in re.findall(r"(?:^|,)\s*(\w+)\s*(?:,|$)", body):
+                if k not in set_keys:
+                    set_keys.add(k)
         for m in re.finditer(r"storage\.local\.get\(\s*\[([^\]]+)\]", content):
             for k in re.findall(r"['\"](\w+)['\"]", m.group(1)):
                 get_keys.add(k)
+        # Keys persisted via the shared lifecycle: `initDefaults(DEFAULTS)` writes
+        # the whole DEFAULTS object literal to storage, so its keys ARE set. Without
+        # this the rule false-flags every defaulted key (theme, stat counters) as
+        # "read but never set" (the set is a computed/object write, not a {key:} literal).
+        for m in re.finditer(r'(?:const|let|var)\s+DEFAULTS\s*=\s*\{([^}]+)\}', content):
+            for k in re.findall(r"(\w+)\s*:", m.group(1)):
+                set_keys.add(k)
+        # Stat counters owned by the shared accumulator: createAccumulator('todayKey','totalKey')
+        # sets them via computed `[todayKey]:` writes the {key:} regex can't see.
+        for m in re.finditer(r"createAccumulator\(\s*['\"](\w+)['\"]\s*,\s*['\"](\w+)['\"]", content):
+            set_keys.add(m.group(1))
+            set_keys.add(m.group(2))
+        # `lastResetDate` is the LoveSpark daily-reset convention key (CLAUDE.md storage
+        # schema). The shared stats lib reads AND writes it inside checkDailyReset() via a
+        # computed `dateKey` var, so a literal-key scan sees it set-but-never-read. When the
+        # stats lib is in use, treat it as both read and set.
+        if 'checkDailyReset' in content or 'LoveSparkStats' in content:
+            get_keys.add('lastResetDate')
+            set_keys.add('lastResetDate')
     if set_keys and get_keys:
         set_only = set_keys - get_keys
         get_only = get_keys - set_keys
@@ -724,8 +768,16 @@ def check_perm_unused(path, js_files):
         "sidePanel": "chrome.sidePanel",
     }
 
+    # declarativeNetRequest can be purely declarative (via manifest declarative_net_request key)
+    manifest_text = manifest.read_text()
+    manifest_declared_apis = set()
+    if "declarative_net_request" in manifest_text:
+        manifest_declared_apis.add("declarativeNetRequest")
+
     unused = []
     for perm in perms:
+        if perm in manifest_declared_apis:
+            continue
         if perm in perm_api_map:
             api = perm_api_map[perm]
             if api not in all_js and perm != "activeTab":

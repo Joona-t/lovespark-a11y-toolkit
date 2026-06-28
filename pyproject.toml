@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lovespark-a11y-toolkit"
-version = "0.1.1"
+version = "0.1.2"
 description = "LoveSpark accessibility, contrast, and agent-ready quality gates."
 readme = "README.md"
 requires-python = ">=3.11"
