@@ -530,6 +530,116 @@ def check_mv3_storage_key(js_files):
     return CheckResult("MV3-STORAGE-KEY", True, "Storage keys consistent")
 
 
+# The four chrome.storage areas. onChanged fires with one of these as areaName.
+STORAGE_AREAS = {"local", "sync", "managed", "session"}
+
+
+def _onchanged_proceeds(body, param):
+    """Which storage areas an onChanged listener actually runs its body for.
+
+    Returns (proceeds:set, confident:bool). confident=False means the guard shape is
+    ambiguous (or absent) and the caller must NOT flag. Handles the canonical idioms:
+      • negative early-return:  if (area !== "X" [&& area !== "Y"]) return;  → {X[, Y]}
+      • positive wrapping guard: if (area === "X" [|| area === "Y"]) { ... }  → {X[, Y]}
+      • positive early-return (skip-this-area): if (area === "X") return;     → ALL − {X}
+    Mixed-polarity or non-area guards return confident=False.
+    """
+    pe = re.escape(param)
+    areas_alt = "|".join(STORAGE_AREAS)
+    cmp_re = re.compile(
+        r'(?:' + pe + r'\s*(===|==|!==|!=)\s*["\'](' + areas_alt + r')["\']'
+        r'|["\'](' + areas_alt + r')["\']\s*(===|==|!==|!=)\s*' + pe + r')'
+    )
+
+    def cmps_in(text):
+        out = []
+        for m in cmp_re.finditer(text):
+            if m.group(1):  # param OP "area"
+                op, area = m.group(1), m.group(2)
+            else:           # "area" OP param
+                op, area = m.group(4), m.group(3)
+            out.append(("ne" if op.startswith("!") else "eq", area))
+        return out
+
+    # 1. Early-return guards: `if (<cond>) return` (with or without a `{`).
+    for cm in re.finditer(r'if\s*\(([^)]*)\)\s*\{?\s*return', body):
+        cmps = cmps_in(cm.group(1))
+        if not cmps:
+            continue
+        ops = {op for op, _ in cmps}
+        areas = {a for _, a in cmps}
+        if ops == {"ne"}:
+            return areas, True                # return-unless-in: proceeds for these areas
+        if ops == {"eq"}:
+            return STORAGE_AREAS - areas, True  # return-when-equal: skips these areas
+        return set(), False                   # mixed polarity → ambiguous
+
+    # 2. Positive wrapping guard: `if (<positive cond>) {` gating the body.
+    for cm in re.finditer(r'if\s*\(([^)]*)\)\s*\{', body):
+        cmps = cmps_in(cm.group(1))
+        if not cmps:
+            continue
+        ops = {op for op, _ in cmps}
+        areas = {a for _, a in cmps}
+        if ops == {"eq"}:
+            return areas, True
+        return set(), False
+
+    return set(), False
+
+
+def check_mv3_storage_area_match(js_files):
+    """MV3-STORAGE-AREA-MATCH: onChanged areaName guard matches the written area.
+
+    A `chrome.storage.onChanged` listener that filters on `areaName` is dead code if it
+    guards on an area the extension never writes to — e.g. `if (areaName !== "sync") return;`
+    while every `.set` targets `storage.local`. The listener never fires, so live updates
+    silently require a page refresh (shipped as a bug in LoveSpark-Retro-Cursor; KI-039).
+
+    Conservative by design: only flags a *clear single-area mismatch* — the whole extension
+    writes to exactly one area and a listener guards on a different one. Extensions that
+    legitimately write to multiple areas, or whose guard shape is ambiguous, are never flagged.
+    """
+    # Tally mutating calls (.set/.remove/.clear — all fire onChanged) per area.
+    writes = {a: 0 for a in STORAGE_AREAS}
+    for f in js_files:
+        content = read_file_safe(f)
+        for a in STORAGE_AREAS:
+            writes[a] += len(re.findall(r'storage\.' + a + r'\.(?:set|remove|clear)\s*\(', content))
+    written = [a for a in STORAGE_AREAS if writes[a] > 0]
+    # A confident mismatch requires exactly one write area. Zero (nothing written) or
+    # multiple (legit dual-area) → not our call to make.
+    if len(written) != 1:
+        return CheckResult("MV3-STORAGE-AREA-MATCH", True,
+                           "onChanged area-guard check N/A (not a single-area writer)")
+    written_area = written[0]
+
+    hits = []
+    for f in js_files:
+        content = read_file_safe(f)
+        # Capture each onChanged listener's areaName parameter (2nd callback arg).
+        for lm in re.finditer(
+                r'storage\.onChanged\.addListener\(\s*(?:async\s+)?(?:function\b[^(]*)?'
+                r'\(?\s*\w+\s*,\s*(\w+)', content):
+            param = lm.group(1)
+            rest = content[lm.end():]
+            nxt = rest.find("storage.onChanged.addListener")
+            body = (rest if nxt == -1 else rest[:nxt])[:1200]
+            proceeds, confident = _onchanged_proceeds(body, param)
+            if confident and written_area not in proceeds:
+                line_num = content[:lm.start()].count('\n') + 1
+                guard = "/".join(sorted(proceeds)) or "no area"
+                hits.append(f"  {f}:{line_num}: onChanged only acts on areaName={guard}, "
+                            f"but every write targets storage.{written_area} (dead listener)")
+    if hits:
+        return CheckResult("MV3-STORAGE-AREA-MATCH", False,
+                           f"onChanged areaName guard doesn't match written area (storage.{written_area})",
+                           hits + [f'  Fix: guard on "{written_area}" — the area your '
+                                   f'.set/.remove/.clear writes target'])
+    return CheckResult("MV3-STORAGE-AREA-MATCH", True,
+                       f"onChanged area guards match writes (storage.{written_area})")
+
+
 def check_mv3_settimeout(js_files):
     """MV3-SETTIMEOUT: No setTimeout deferring storage in SW."""
     hits = []
@@ -1010,6 +1120,7 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
     if "mv3" in categories_to_run:
         results["mv3"] = [
             check_mv3_storage_mix(js_files),
+            check_mv3_storage_area_match(js_files),
             check_mv3_storage_key(js_files),
             check_mv3_settimeout(js_files),
             check_mv3_debug_guard(js_files),
@@ -1204,6 +1315,62 @@ def print_json(results, project_name, project_type, regressions=None):
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
+def _selftest():
+    """Built-in self-test for MV3-STORAGE-AREA-MATCH (KI-039 regression guard).
+
+    Rebuilds the LoveSpark-Retro-Cursor bug shape and its fix in throwaway extensions:
+      • pre-fix  — onChanged guards areaName "sync" while every .set writes storage.local → must FAIL
+      • fixed    — onChanged guards areaName "local"                                       → must PASS
+      • dual     — writes to both local AND sync                                           → must PASS (conservative)
+    Returns a process exit code (0 = all good).
+    """
+    import tempfile
+
+    WRITER = (
+        '(() => {\n'
+        '  chrome.storage.local.set({ lovesparkCursorPack: "retro-pink" });\n'
+        '})();\n'
+    )
+    LISTENER = (
+        '(() => {\n'
+        '  chrome.storage.onChanged.addListener((changes, areaName) => {\n'
+        '    if (areaName !== "%s") {\n'
+        '      return;\n'
+        '    }\n'
+        '    chrome.storage.local.get(["lovesparkCursorPack"], (next) => { void next; });\n'
+        '  });\n'
+        '})();\n'
+    )
+
+    failures = []
+
+    def run_case(label, writer_js, listener_js, expect_pass):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "popup.js").write_text(writer_js)
+            Path(d, "content_script.js").write_text(listener_js)
+            res = check_mv3_storage_area_match(collect_files(d, ".js"))
+            ok = (res.passed == expect_pass)
+            print(f"  [{'PASS' if ok else 'FAIL'}] {label} — check {'passed' if res.passed else 'FAILED'}: {res.message}")
+            if not ok:
+                failures.append(label)
+                for line in res.details:
+                    print(line)
+
+    run_case("pre-fix (guard sync, writes local) must FAIL",
+             WRITER, LISTENER % "sync", expect_pass=False)
+    run_case("fixed (guard local, writes local) must PASS",
+             WRITER, LISTENER % "local", expect_pass=True)
+    run_case("dual-area writer (local + sync) must PASS",
+             WRITER + '(() => { chrome.storage.sync.set({ b: 2 }); })();\n',
+             LISTENER % "sync", expect_pass=True)
+
+    if failures:
+        print(f"\n  {len(failures)} self-test case(s) failed: {', '.join(failures)}")
+        return 1
+    print("\n  All MV3-STORAGE-AREA-MATCH self-tests passed.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ls-check — Unified LoveSpark quality pipeline",
@@ -1233,7 +1400,12 @@ def main():
     parser.add_argument("--type", choices=["extension", "rust", "python", "ios", "ios-expo",
                                            "web-react", "web-static", "general"],
                         help="Override auto-detected project type")
+    parser.add_argument("--selftest", action="store_true",
+                        help="Run built-in self-tests (MV3-STORAGE-AREA-MATCH / KI-039) and exit")
     args = parser.parse_args()
+
+    if args.selftest:
+        sys.exit(_selftest())
 
     path = Path(args.path).resolve()
     global HISTORY_PATH
