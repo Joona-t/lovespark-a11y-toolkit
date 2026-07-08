@@ -160,3 +160,31 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
   `python3 scripts/ls-check.py`, or explicitly document that the two can diverge and only the
   canonical run is the claim of record. Any future "N/N pass" line logged in this file for
   `ls-check --strict` should note which binary/path produced it if there's any ambiguity.
+
+## 2026-07-09 — KI-041: A11Y-LIVE false positives — check ignored ancestor live regions
+- Problem: `check_a11y_live` only checked whether the *exact opening tag* carrying a dynamic
+  element's id had an `aria-live` attribute. Per WCAG/ARIA live-region semantics a live region
+  announces changes to ANY descendant, so ids nested inside e.g.
+  `<div class="card-section" aria-live="polite">` were wrongly flagged. Confirmed
+  false-positives fleet-wide during unit R-cws-a11y-3: lovespark-affirmation-cards (4 of 5
+  warnings bogus), lovespark-calm (1/1), lovespark-win-jar (6/6) — 11 of 12 warnings across the
+  three repos were noise. This fork's copy was even noisier: it flagged *every* id in a file
+  whenever `animateCount(` appeared anywhere.
+- Root cause: regex-only tag scan has no DOM context — no way to see ancestors.
+- Fix: added `_LiveRegionScanner` (stdlib `html.parser`, stack-based walk) that marks an id
+  covered when its own tag OR any open ancestor declares an active live region
+  (`aria-live` ≠ "off", or implicit live roles `status`/`alert`/`log`). Tolerant of malformed
+  HTML (unclosed tags, stray end tags, void elements); parser output is unioned with the old
+  regex pass as a floor, so coverage can only widen — genuinely uncovered ids are still
+  flagged. Ported function-by-function into this fork (which also gained the canonical's
+  per-variable dynamic-target detection + interactive-id suppression, replacing the
+  `animateCount(` blanket match) and call site updated to pass `html_files`. Canonical
+  `Claude x LoveSpark/scripts/ls-check.py` fixed identically, `TOOL_VERSION` 1.1.1 → 1.1.2.
+- Verification: before/after on the three repos — 12 A11Y-LIVE warnings → 1, and the survivor
+  is genuine (`#themeLabel` referenced by shared lovespark-theme.js but absent from
+  affirmation-cards' popup.html). 10 synthetic edge cases pass (ancestor/deep nesting/sibling
+  isolation/aria-live=off/role=status/malformed HTML/void tags/interactive/own-tag/stray end
+  tag). New regression test `test_a11y_live_respects_ancestor_live_region`; suite 13/13 green.
+  Installed `ls-check --version` confirms 1.1.2 (shim execs canonical directly).
+- Prevention: any future HTML-structural check (ancestor/descendant relationships) must use the
+  `_LiveRegionScanner` stack-walk pattern, not flat regex over tags — regex sees tags, not trees.

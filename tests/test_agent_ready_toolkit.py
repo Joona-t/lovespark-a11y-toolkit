@@ -177,3 +177,43 @@ def test_integrations_exist_and_are_agent_safe():
     assert "ls-check" in text
     assert "ls-audit-contrast" in text
     assert "deterministic" in openclaw.read_text().lower()
+
+
+def test_a11y_live_respects_ancestor_live_region(tmp_path):
+    """A live region covers ALL descendants — ids inside an aria-live ancestor
+    must not be flagged; genuinely uncovered ids still must be (BUG-013)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("lscheck_legacy", ROOT / "scripts" / "ls-check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    html = tmp_path / "popup.html"
+    html.write_text(
+        '<div class="card-section" aria-live="polite">'
+        '<p id="cardText">x</p><p id="cardCategory">y</p></div>'
+        '<div role="status"><span id="statusMsg">s</span></div>'
+        '<div aria-live="off"><span id="muted">m</span></div>'
+        '<span id="orphan">z</span>'
+    )
+    js = tmp_path / "popup.js"
+    js.write_text(
+        "const cardText = document.getElementById('cardText');\n"
+        "cardText.textContent = 'a';\n"
+        "const cardCategory = document.getElementById('cardCategory');\n"
+        "cardCategory.textContent = 'b';\n"
+        "const statusMsg = document.getElementById('statusMsg');\n"
+        "statusMsg.textContent = 'c';\n"
+        "const muted = document.getElementById('muted');\n"
+        "muted.textContent = 'd';\n"
+        "const orphan = document.getElementById('orphan');\n"
+        "orphan.textContent = 'e';\n"
+    )
+    result = mod.check_a11y_live([str(js)], [str(html)])
+    assert result.passed is False
+    joined = "\n".join(result.details)
+    assert "#orphan" in joined       # genuinely uncovered → still flagged
+    assert "#muted" in joined        # aria-live="off" is not coverage
+    assert "#cardText" not in joined      # covered by aria-live ancestor
+    assert "#cardCategory" not in joined  # covered by aria-live ancestor
+    assert "#statusMsg" not in joined     # covered by role="status" ancestor

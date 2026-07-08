@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────
@@ -341,23 +342,114 @@ def check_a11y_label(html_files):
     return CheckResult("A11Y-LABEL", True, "All emoji buttons have aria-label")
 
 
-def check_a11y_live(js_files):
+class _LiveRegionScanner(HTMLParser):
+    """Collects ids covered by an ARIA live region — own tag OR any ancestor.
+
+    A live region announces changes to ANY descendant (WCAG/ARIA live-region
+    semantics), so an id inside e.g. <div aria-live="polite"> is covered even
+    without its own aria-live attribute. role=status/alert/log are implicit
+    live regions. aria-live="off" does not count as coverage.
+    """
+
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                 "link", "meta", "param", "source", "track", "wbr"}
+    LIVE_ROLES = {"status", "alert", "log"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._stack = []       # (tag, is_live) per open element
+        self._live_depth = 0   # count of open ancestors that are live regions
+        self.covered_ids = set()
+        self.interactive_ids = set()
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        is_live = (("aria-live" in a and a["aria-live"].strip().lower() != "off")
+                   or a.get("role", "").strip().lower() in self.LIVE_ROLES)
+        eid = a.get("id", "").strip()
+        if eid:
+            if is_live or self._live_depth:
+                self.covered_ids.add(eid)
+            if tag in ("button", "input", "select", "textarea", "label"):
+                self.interactive_ids.add(eid)
+        if tag not in self.VOID_TAGS:
+            self._stack.append((tag, is_live))
+            if is_live:
+                self._live_depth += 1
+
+    def handle_endtag(self, tag):
+        # Tolerant of unclosed intermediate tags: pop back to the matching tag.
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                self._live_depth -= sum(1 for _, live in self._stack[i:] if live)
+                del self._stack[i:]
+                return
+
+
+def _scan_live_region_coverage(hcontent):
+    """(covered_ids, interactive_ids) for one HTML document, ancestor-aware."""
+    scanner = _LiveRegionScanner()
+    try:
+        scanner.feed(hcontent)
+        scanner.close()
+    except Exception:
+        pass  # partial results are still valid; regex pass below is the floor
+    return scanner.covered_ids, scanner.interactive_ids
+
+
+def check_a11y_live(js_files, html_files=None):
     """A11Y-LIVE: dynamic .textContent targets should have aria-live."""
-    # This is a heuristic — check for .textContent = assignments on stat elements
+    html_files = html_files or []
+    # Build set of IDs that already have aria-live in HTML
+    has_aria_live = set()
+    # Also detect interactive elements (buttons, inputs, selects) — aria-live is inappropriate
+    interactive_ids = set()
+    for hf in html_files:
+        hcontent = read_file_safe(hf)
+        # Ancestor-aware pass: an id inside a live-region ancestor is covered.
+        covered, interactive = _scan_live_region_coverage(hcontent)
+        has_aria_live |= covered
+        interactive_ids |= interactive
+        # Regex pass (own opening tag only) kept as a floor for malformed HTML.
+        for m in re.finditer(r'id=["\'](\w+)["\']', hcontent):
+            eid = m.group(1)
+            # Check surrounding tag context for aria-live
+            # Find the full opening tag containing this id
+            for tag_m in re.finditer(r'<(\w+)\b[^>]*\bid=["\']' + re.escape(eid) + r'["\'][^>]*>', hcontent):
+                tag_text = tag_m.group(0)
+                tag_name = tag_m.group(1).lower()
+                if 'aria-live' in tag_text:
+                    has_aria_live.add(eid)
+                if tag_name in ('button', 'input', 'select', 'textarea', 'label'):
+                    interactive_ids.add(eid)
+
     hits = []
     for f in js_files:
         content = read_file_safe(f)
-        # Look for patterns like: el.textContent = value (common stat updates)
-        dynamic_ids = set()
+        # Map element IDs to their variable names
+        id_to_var = {}
+        for m in re.finditer(r"(?:const|let|var)\s+(\w+)\s*=\s*document\.getElementById\(['\"](\w+)['\"]\)", content):
+            id_to_var[m.group(2)] = m.group(1)
+        # Also capture bare getElementById calls
         for m in re.finditer(r"getElementById\(['\"](\w+)['\"]\)", content):
-            el_id = m.group(1)
-            # Check if this element gets textContent updates
-            if re.search(rf'{el_id}[^;]*\.textContent\s*=', content) or \
-               re.search(r'animateCount\(', content):
+            if m.group(1) not in id_to_var:
+                id_to_var[m.group(1)] = None
+
+        dynamic_ids = set()
+        for el_id, var_name in id_to_var.items():
+            # Check if this specific element gets content/visibility updates
+            patterns = [rf'{el_id}[^;]*\.textContent\s*=', rf'{el_id}[^;]*\.style\.display\s*=']
+            if var_name:
+                patterns += [rf'{var_name}\.textContent\s*=', rf'{var_name}\.style\.display\s*=']
+                # Check if passed to animateCount
+                patterns.append(rf'animateCount\(\s*{var_name}\b')
+            if any(re.search(p, content) for p in patterns):
                 dynamic_ids.add(el_id)
+
         if dynamic_ids:
-            # Just flag as warning — the HTML needs aria-live, not JS
-            for eid in dynamic_ids:
+            for eid in sorted(dynamic_ids):
+                if eid in has_aria_live or eid in interactive_ids:
+                    continue
                 hits.append(f"  {f}: #{eid} gets dynamic updates — ensure aria-live='polite' in HTML")
     if hits:
         return CheckResult("A11Y-LIVE", False, "Dynamic content targets may need aria-live", hits, severity="warn")
@@ -1215,7 +1307,7 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
             check_a11y_dialog(html_files),
             check_a11y_expanded(html_files, js_files),
             check_a11y_label(html_files),
-            check_a11y_live(js_files),
+            check_a11y_live(js_files, html_files),
             check_a11y_input(html_files),
             check_a11y_touch(css_files),
             check_a11y_lang(html_files),
