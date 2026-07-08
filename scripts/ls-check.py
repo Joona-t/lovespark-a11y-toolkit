@@ -26,7 +26,43 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = SCRIPT_DIR.parent
-SHARED_LIB = BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+
+
+def find_shared_lib(start_dir=None):
+    """Locate the canonical lovespark-shared-lib directory.
+
+    KI-037: SHARED_LIB used to be a single hardcoded "one level up" path
+    (BASE_DIR / Extensions / ...), which silently resolved to a
+    non-existent directory the moment this toolkit was extracted into its
+    own repo (Apps & Tools/lovespark-a11y-toolkit sits two levels below
+    "Claude x LoveSpark", not one) — every BRAND-LIB-SYNC check then
+    skipped all files (canonical.exists() was always False) and reported
+    a false "matches canonical" pass.
+
+    Resolution order:
+      1. LOVESPARK_SHARED_LIB env var, if set (explicit override)
+      2. Walk up from start_dir looking for
+         <ancestor>/Extensions/infrastructure/lovespark-shared-lib
+      3. None if neither resolves (callers must handle the miss loudly,
+         not silently skip)
+    """
+    override = os.environ.get("LOVESPARK_SHARED_LIB")
+    if override:
+        return Path(override)
+
+    current = Path(start_dir or SCRIPT_DIR).resolve()
+    while True:
+        candidate = current / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+        if candidate.is_dir():
+            return candidate
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+SHARED_LIB = find_shared_lib() or (
+    BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+)
 HISTORY_PATH = None  # set per project in main()
 
 SHARED_FILES = [
@@ -631,26 +667,42 @@ def check_brand_theme(path, html_files, js_files):
 
 
 def check_brand_lib_sync(path):
-    """BRAND-LIB-SYNC: Shared lib matches canonical checksums."""
+    """BRAND-LIB-SYNC: Shared lib matches canonical checksums (md5 diff)."""
     lib_dir = Path(path) / "lib"
     if not lib_dir.exists():
         return CheckResult("BRAND-LIB-SYNC", True, "No lib/ directory (N/A)", severity="warn")
 
+    # KI-037: previously, a missing/unresolvable SHARED_LIB caused every
+    # file in the loop below to be silently skipped (canonical.exists() was
+    # always False), so this check always reported a false "matches
+    # canonical" pass. Fail loudly instead — an unresolvable canonical
+    # source means drift genuinely cannot be verified.
+    if SHARED_LIB is None or not SHARED_LIB.is_dir():
+        return CheckResult("BRAND-LIB-SYNC", False,
+                           "Canonical lovespark-shared-lib not found — cannot verify sync",
+                           [f"  Looked for: {SHARED_LIB}",
+                            "  Fix: set LOVESPARK_SHARED_LIB env var to the canonical repo path"])
+
     mismatches = []
+    missing_local = []
     for fname in SHARED_FILES:
         canonical = SHARED_LIB / fname
         local = lib_dir / fname
-        if not canonical.exists() or not local.exists():
+        if not canonical.exists():
+            continue  # canonical doesn't ship this file — nothing to compare
+        if not local.exists():
+            missing_local.append(f"  {fname}: missing locally (canonical has it)")
             continue
         c_hash = hashlib.md5(canonical.read_bytes()).hexdigest()
         l_hash = hashlib.md5(local.read_bytes()).hexdigest()
         if c_hash != l_hash:
-            mismatches.append(f"  {fname}: local differs from canonical")
+            mismatches.append(f"  {fname}: local differs from canonical (md5 mismatch)")
 
-    if mismatches:
+    problems = mismatches + missing_local
+    if problems:
         return CheckResult("BRAND-LIB-SYNC", False,
                            "Shared lib out of sync with canonical",
-                           mismatches + ["  Fix: Run scripts/sync-shared-lib.sh"])
+                           problems + ["  Fix: Run scripts/sync-shared-lib.sh"])
     return CheckResult("BRAND-LIB-SYNC", True, "Shared lib matches canonical")
 
 
@@ -780,6 +832,59 @@ def check_qual_bugs_log(path):
         return CheckResult("QUAL-BUGS-LOG", True, "BUGS_AND_ITERATIONS.md present")
     return CheckResult("QUAL-BUGS-LOG", False, "BUGS_AND_ITERATIONS.md missing",
                        ["  Required by CLAUDE.md for every repo"], severity="warn")
+
+
+# ── Rule #10: No Paid LLM API ────────────────────────────────────────────
+# CLAUDE.md rule #10: all LLM functionality must route through the user's
+# own CLI/subscription (claude -p / codex exec / sparkd) invoked as a local
+# subprocess — never a paid HTTP API billed to the user. This grep gate is
+# a first-pass detector for the most common violation shapes found live in
+# the fleet audit (KI-037); it flags for human review, it does not attempt
+# to auto-fix.
+PAID_API_PATTERNS = [
+    (r'api\.openai\.com', "OpenAI HTTP API endpoint"),
+    (r'api\.anthropic\.com', "Anthropic HTTP API endpoint"),
+    (r'generativelanguage\.googleapis\.com', "Google Gemini HTTP API endpoint"),
+    (r'api\.cohere\.ai', "Cohere HTTP API endpoint"),
+    (r'\bsk-[A-Za-z0-9]{20,}\b', "hardcoded OpenAI-style API key"),
+    (r'\bsk-ant-[A-Za-z0-9\-]{20,}\b', "hardcoded Anthropic API key"),
+    (r'OpenAI\s*\(\s*api_key', "OpenAI SDK client instantiated with api_key (Python)"),
+    (r'anthropic\.Anthropic\s*\(', "Anthropic SDK client instantiated (Python)"),
+    (r'new\s+OpenAI\s*\(', "OpenAI SDK client instantiated (JS/TS)"),
+    (r'new\s+Anthropic\s*\(', "Anthropic SDK client instantiated (JS/TS)"),
+]
+
+# Lines that are clearly documentation/comments about the rule itself, or a
+# deliberately-disabled/stubbed reference, aren't live violations.
+PAID_API_EXCLUDE_HINTS = (
+    "no paid", "never charge", "rule #10", "rule 10", "rule-10",
+    "bring your own key is not", "not implemented", "todo", "example only",
+)
+
+
+def check_qual_paid_api(path):
+    """QUAL-PAID-API: No paid LLM API call sites — rule #10 (local CLI only)."""
+    scan_files = (
+        collect_files(path, ".js") + collect_files(path, ".ts") +
+        collect_files(path, ".py") + collect_files(path, ".swift")
+    )
+    hits = []
+    for f in scan_files:
+        content = read_file_safe(f)
+        for i, line in enumerate(content.splitlines(), 1):
+            lowered = line.lower()
+            if any(hint in lowered for hint in PAID_API_EXCLUDE_HINTS):
+                continue
+            for pattern, label in PAID_API_PATTERNS:
+                if re.search(pattern, line):
+                    hits.append(f"  {f}:{i}: {label} — {line.strip()[:80]}")
+                    break
+
+    if hits:
+        return CheckResult("QUAL-PAID-API", False,
+                           "Paid LLM API call site detected — rule #10 requires local CLI subprocess only",
+                           hits + ["  Fix: route through the user's own CLI (claude -p / codex exec) or sparkd"])
+    return CheckResult("QUAL-PAID-API", True, "No paid LLM API patterns detected")
 
 
 # ── Rust Checks ──────────────────────────────────────────────────────────
@@ -1043,6 +1148,7 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
             check_qual_license(path),
             check_qual_gitignore(path),
             check_qual_bugs_log(path),
+            check_qual_paid_api(path),
         ]
 
     # Rust

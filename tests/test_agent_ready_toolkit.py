@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -6,8 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cmd(*args):
-    return subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
+def run_cmd(*args, env=None):
+    full_env = {**os.environ, **(env or {})}
+    return subprocess.run(args, cwd=ROOT, text=True, capture_output=True, env=full_env)
 
 
 def test_package_entrypoints_importable():
@@ -80,6 +82,47 @@ def test_ls_check_json_schema_and_project_local_history(tmp_path):
     assert data["tool_version"]
     assert data["type"] == "python"
     assert (tmp_path / ".lovespark" / "ls-check-history.json").exists()
+
+
+def test_shared_lib_resolves_via_env_override(tmp_path):
+    """KI-037: LOVESPARK_SHARED_LIB must win regardless of on-disk nesting depth."""
+    fake_shared_lib = tmp_path / "lovespark-shared-lib"
+    fake_shared_lib.mkdir()
+    (fake_shared_lib / "lovespark-tokens.css").write_text(":root { --ls-text-dark: #123456; }")
+
+    result = run_cmd(
+        sys.executable, "scripts/audit-contrast.py", "--verbose",
+        env={"LOVESPARK_SHARED_LIB": str(fake_shared_lib)},
+    )
+    assert result.returncode in (0, 1)
+    assert str(fake_shared_lib) in result.stdout
+    assert "CSS file not found" not in result.stdout
+
+
+def test_qual_paid_api_flags_known_violation_and_passes_clean(tmp_path):
+    """KI-037: rule #10 grep gate — flags a live paid-API call site, passes clean code."""
+    project_dirty = tmp_path / "dirty"
+    project_dirty.mkdir()
+    (project_dirty / "manifest.json").write_text('{"manifest_version": 3}')
+    (project_dirty / "background.js").write_text(
+        "const client = new OpenAI({ apiKey: 'sk-abcdefghijklmnopqrstuvwx' });\n"
+    )
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project_dirty), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-PAID-API"]["passed"] is False
+
+    project_clean = tmp_path / "clean"
+    project_clean.mkdir()
+    (project_clean / "manifest.json").write_text('{"manifest_version": 3}')
+    (project_clean / "background.js").write_text(
+        "const { spawn } = require('child_process');\nspawn('claude', ['-p', prompt]);\n"
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project_clean), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-PAID-API"]["passed"] is True
 
 
 def test_integrations_exist_and_are_agent_safe():
