@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -6,8 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cmd(*args):
-    return subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
+def run_cmd(*args, env=None):
+    full_env = {**os.environ, **(env or {})}
+    return subprocess.run(args, cwd=ROOT, text=True, capture_output=True, env=full_env)
 
 
 def test_package_entrypoints_importable():
@@ -82,6 +84,88 @@ def test_ls_check_json_schema_and_project_local_history(tmp_path):
     assert (tmp_path / ".lovespark" / "ls-check-history.json").exists()
 
 
+def test_shared_lib_resolves_via_env_override(tmp_path):
+    """KI-037: LOVESPARK_SHARED_LIB must win regardless of on-disk nesting depth."""
+    fake_shared_lib = tmp_path / "lovespark-shared-lib"
+    fake_shared_lib.mkdir()
+    (fake_shared_lib / "lovespark-tokens.css").write_text(":root { --ls-text-dark: #123456; }")
+
+    result = run_cmd(
+        sys.executable, "scripts/audit-contrast.py", "--verbose",
+        env={"LOVESPARK_SHARED_LIB": str(fake_shared_lib)},
+    )
+    assert result.returncode in (0, 1)
+    assert str(fake_shared_lib) in result.stdout
+    assert "CSS file not found" not in result.stdout
+
+
+def test_qual_paid_api_flags_known_violation_and_passes_clean(tmp_path):
+    """KI-037: rule #10 grep gate — flags a live paid-API call site, passes clean code."""
+    project_dirty = tmp_path / "dirty"
+    project_dirty.mkdir()
+    (project_dirty / "manifest.json").write_text('{"manifest_version": 3}')
+    (project_dirty / "background.js").write_text(
+        "const client = new OpenAI({ apiKey: 'sk-abcdefghijklmnopqrstuvwx' });\n"  # ls-check:test-fixture (KI-037 dirty fixture, not live code)
+    )
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project_dirty), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-PAID-API"]["passed"] is False
+
+    project_clean = tmp_path / "clean"
+    project_clean.mkdir()
+    (project_clean / "manifest.json").write_text('{"manifest_version": 3}')
+    (project_clean / "background.js").write_text(
+        "const { spawn } = require('child_process');\nspawn('claude', ['-p', prompt]);\n"
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project_clean), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-PAID-API"]["passed"] is True
+
+
+def test_qual_test_drift_flags_stale_readme_count(tmp_path):
+    """KI-039: README 'N tests' claims must match the grep-counted test-function count."""
+    project = tmp_path / "test-drift"
+    (project / "Tests").mkdir(parents=True)
+    (project / "README.md").write_text("swift test  # 2 unit tests\n")
+    (project / "Tests" / "FooTests.swift").write_text(
+        "func testA() {}\nfunc testB() {}\nfunc testC() {}\n"
+    )
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-TEST-DRIFT"]["passed"] is False
+    assert "3 test functions" in qual_ids["QUAL-TEST-DRIFT"]["message"]
+
+    (project / "README.md").write_text("swift test  # 3 unit tests\n")
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-TEST-DRIFT"]["passed"] is True
+
+
+def test_qual_changelog_drift_flags_stale_manifest_version(tmp_path):
+    """KI-039: CHANGELOG.md's latest version heading must match manifest.json's version."""
+    project = tmp_path / "changelog-drift"
+    project.mkdir()
+    (project / "manifest.json").write_text('{"manifest_version": 3, "version": "1.0.0"}')
+    (project / "CHANGELOG.md").write_text("## [1.1.0] - 2026-07-08\n- bumped stuff\n")
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-CHANGELOG-DRIFT"]["passed"] is False
+
+    (project / "manifest.json").write_text('{"manifest_version": 3, "version": "1.1.0"}')
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-CHANGELOG-DRIFT"]["passed"] is True
+
+
 def test_integrations_exist_and_are_agent_safe():
     hermes = ROOT / "integrations" / "hermes" / "SKILL.md"
     openclaw = ROOT / "integrations" / "openclaw" / "audit-a11y.md"
@@ -93,3 +177,43 @@ def test_integrations_exist_and_are_agent_safe():
     assert "ls-check" in text
     assert "ls-audit-contrast" in text
     assert "deterministic" in openclaw.read_text().lower()
+
+
+def test_a11y_live_respects_ancestor_live_region(tmp_path):
+    """A live region covers ALL descendants — ids inside an aria-live ancestor
+    must not be flagged; genuinely uncovered ids still must be (BUG-013)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("lscheck_legacy", ROOT / "scripts" / "ls-check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    html = tmp_path / "popup.html"
+    html.write_text(
+        '<div class="card-section" aria-live="polite">'
+        '<p id="cardText">x</p><p id="cardCategory">y</p></div>'
+        '<div role="status"><span id="statusMsg">s</span></div>'
+        '<div aria-live="off"><span id="muted">m</span></div>'
+        '<span id="orphan">z</span>'
+    )
+    js = tmp_path / "popup.js"
+    js.write_text(
+        "const cardText = document.getElementById('cardText');\n"
+        "cardText.textContent = 'a';\n"
+        "const cardCategory = document.getElementById('cardCategory');\n"
+        "cardCategory.textContent = 'b';\n"
+        "const statusMsg = document.getElementById('statusMsg');\n"
+        "statusMsg.textContent = 'c';\n"
+        "const muted = document.getElementById('muted');\n"
+        "muted.textContent = 'd';\n"
+        "const orphan = document.getElementById('orphan');\n"
+        "orphan.textContent = 'e';\n"
+    )
+    result = mod.check_a11y_live([str(js)], [str(html)])
+    assert result.passed is False
+    joined = "\n".join(result.details)
+    assert "#orphan" in joined       # genuinely uncovered → still flagged
+    assert "#muted" in joined        # aria-live="off" is not coverage
+    assert "#cardText" not in joined      # covered by aria-live ancestor
+    assert "#cardCategory" not in joined  # covered by aria-live ancestor
+    assert "#statusMsg" not in joined     # covered by role="status" ancestor

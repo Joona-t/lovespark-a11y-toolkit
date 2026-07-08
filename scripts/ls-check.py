@@ -20,13 +20,50 @@ import re
 import subprocess
 import sys
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = SCRIPT_DIR.parent
-SHARED_LIB = BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+
+
+def find_shared_lib(start_dir=None):
+    """Locate the canonical lovespark-shared-lib directory.
+
+    KI-037: SHARED_LIB used to be a single hardcoded "one level up" path
+    (BASE_DIR / Extensions / ...), which silently resolved to a
+    non-existent directory the moment this toolkit was extracted into its
+    own repo (Apps & Tools/lovespark-a11y-toolkit sits two levels below
+    "Claude x LoveSpark", not one) — every BRAND-LIB-SYNC check then
+    skipped all files (canonical.exists() was always False) and reported
+    a false "matches canonical" pass.
+
+    Resolution order:
+      1. LOVESPARK_SHARED_LIB env var, if set (explicit override)
+      2. Walk up from start_dir looking for
+         <ancestor>/Extensions/infrastructure/lovespark-shared-lib
+      3. None if neither resolves (callers must handle the miss loudly,
+         not silently skip)
+    """
+    override = os.environ.get("LOVESPARK_SHARED_LIB")
+    if override:
+        return Path(override)
+
+    current = Path(start_dir or SCRIPT_DIR).resolve()
+    while True:
+        candidate = current / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+        if candidate.is_dir():
+            return candidate
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+SHARED_LIB = find_shared_lib() or (
+    BASE_DIR / "Extensions" / "infrastructure" / "lovespark-shared-lib"
+)
 HISTORY_PATH = None  # set per project in main()
 
 SHARED_FILES = [
@@ -305,23 +342,114 @@ def check_a11y_label(html_files):
     return CheckResult("A11Y-LABEL", True, "All emoji buttons have aria-label")
 
 
-def check_a11y_live(js_files):
+class _LiveRegionScanner(HTMLParser):
+    """Collects ids covered by an ARIA live region — own tag OR any ancestor.
+
+    A live region announces changes to ANY descendant (WCAG/ARIA live-region
+    semantics), so an id inside e.g. <div aria-live="polite"> is covered even
+    without its own aria-live attribute. role=status/alert/log are implicit
+    live regions. aria-live="off" does not count as coverage.
+    """
+
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                 "link", "meta", "param", "source", "track", "wbr"}
+    LIVE_ROLES = {"status", "alert", "log"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._stack = []       # (tag, is_live) per open element
+        self._live_depth = 0   # count of open ancestors that are live regions
+        self.covered_ids = set()
+        self.interactive_ids = set()
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        is_live = (("aria-live" in a and a["aria-live"].strip().lower() != "off")
+                   or a.get("role", "").strip().lower() in self.LIVE_ROLES)
+        eid = a.get("id", "").strip()
+        if eid:
+            if is_live or self._live_depth:
+                self.covered_ids.add(eid)
+            if tag in ("button", "input", "select", "textarea", "label"):
+                self.interactive_ids.add(eid)
+        if tag not in self.VOID_TAGS:
+            self._stack.append((tag, is_live))
+            if is_live:
+                self._live_depth += 1
+
+    def handle_endtag(self, tag):
+        # Tolerant of unclosed intermediate tags: pop back to the matching tag.
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                self._live_depth -= sum(1 for _, live in self._stack[i:] if live)
+                del self._stack[i:]
+                return
+
+
+def _scan_live_region_coverage(hcontent):
+    """(covered_ids, interactive_ids) for one HTML document, ancestor-aware."""
+    scanner = _LiveRegionScanner()
+    try:
+        scanner.feed(hcontent)
+        scanner.close()
+    except Exception:
+        pass  # partial results are still valid; regex pass below is the floor
+    return scanner.covered_ids, scanner.interactive_ids
+
+
+def check_a11y_live(js_files, html_files=None):
     """A11Y-LIVE: dynamic .textContent targets should have aria-live."""
-    # This is a heuristic — check for .textContent = assignments on stat elements
+    html_files = html_files or []
+    # Build set of IDs that already have aria-live in HTML
+    has_aria_live = set()
+    # Also detect interactive elements (buttons, inputs, selects) — aria-live is inappropriate
+    interactive_ids = set()
+    for hf in html_files:
+        hcontent = read_file_safe(hf)
+        # Ancestor-aware pass: an id inside a live-region ancestor is covered.
+        covered, interactive = _scan_live_region_coverage(hcontent)
+        has_aria_live |= covered
+        interactive_ids |= interactive
+        # Regex pass (own opening tag only) kept as a floor for malformed HTML.
+        for m in re.finditer(r'id=["\'](\w+)["\']', hcontent):
+            eid = m.group(1)
+            # Check surrounding tag context for aria-live
+            # Find the full opening tag containing this id
+            for tag_m in re.finditer(r'<(\w+)\b[^>]*\bid=["\']' + re.escape(eid) + r'["\'][^>]*>', hcontent):
+                tag_text = tag_m.group(0)
+                tag_name = tag_m.group(1).lower()
+                if 'aria-live' in tag_text:
+                    has_aria_live.add(eid)
+                if tag_name in ('button', 'input', 'select', 'textarea', 'label'):
+                    interactive_ids.add(eid)
+
     hits = []
     for f in js_files:
         content = read_file_safe(f)
-        # Look for patterns like: el.textContent = value (common stat updates)
-        dynamic_ids = set()
+        # Map element IDs to their variable names
+        id_to_var = {}
+        for m in re.finditer(r"(?:const|let|var)\s+(\w+)\s*=\s*document\.getElementById\(['\"](\w+)['\"]\)", content):
+            id_to_var[m.group(2)] = m.group(1)
+        # Also capture bare getElementById calls
         for m in re.finditer(r"getElementById\(['\"](\w+)['\"]\)", content):
-            el_id = m.group(1)
-            # Check if this element gets textContent updates
-            if re.search(rf'{el_id}[^;]*\.textContent\s*=', content) or \
-               re.search(r'animateCount\(', content):
+            if m.group(1) not in id_to_var:
+                id_to_var[m.group(1)] = None
+
+        dynamic_ids = set()
+        for el_id, var_name in id_to_var.items():
+            # Check if this specific element gets content/visibility updates
+            patterns = [rf'{el_id}[^;]*\.textContent\s*=', rf'{el_id}[^;]*\.style\.display\s*=']
+            if var_name:
+                patterns += [rf'{var_name}\.textContent\s*=', rf'{var_name}\.style\.display\s*=']
+                # Check if passed to animateCount
+                patterns.append(rf'animateCount\(\s*{var_name}\b')
+            if any(re.search(p, content) for p in patterns):
                 dynamic_ids.add(el_id)
+
         if dynamic_ids:
-            # Just flag as warning — the HTML needs aria-live, not JS
-            for eid in dynamic_ids:
+            for eid in sorted(dynamic_ids):
+                if eid in has_aria_live or eid in interactive_ids:
+                    continue
                 hits.append(f"  {f}: #{eid} gets dynamic updates — ensure aria-live='polite' in HTML")
     if hits:
         return CheckResult("A11Y-LIVE", False, "Dynamic content targets may need aria-live", hits, severity="warn")
@@ -631,26 +759,42 @@ def check_brand_theme(path, html_files, js_files):
 
 
 def check_brand_lib_sync(path):
-    """BRAND-LIB-SYNC: Shared lib matches canonical checksums."""
+    """BRAND-LIB-SYNC: Shared lib matches canonical checksums (md5 diff)."""
     lib_dir = Path(path) / "lib"
     if not lib_dir.exists():
         return CheckResult("BRAND-LIB-SYNC", True, "No lib/ directory (N/A)", severity="warn")
 
+    # KI-037: previously, a missing/unresolvable SHARED_LIB caused every
+    # file in the loop below to be silently skipped (canonical.exists() was
+    # always False), so this check always reported a false "matches
+    # canonical" pass. Fail loudly instead — an unresolvable canonical
+    # source means drift genuinely cannot be verified.
+    if SHARED_LIB is None or not SHARED_LIB.is_dir():
+        return CheckResult("BRAND-LIB-SYNC", False,
+                           "Canonical lovespark-shared-lib not found — cannot verify sync",
+                           [f"  Looked for: {SHARED_LIB}",
+                            "  Fix: set LOVESPARK_SHARED_LIB env var to the canonical repo path"])
+
     mismatches = []
+    missing_local = []
     for fname in SHARED_FILES:
         canonical = SHARED_LIB / fname
         local = lib_dir / fname
-        if not canonical.exists() or not local.exists():
+        if not canonical.exists():
+            continue  # canonical doesn't ship this file — nothing to compare
+        if not local.exists():
+            missing_local.append(f"  {fname}: missing locally (canonical has it)")
             continue
         c_hash = hashlib.md5(canonical.read_bytes()).hexdigest()
         l_hash = hashlib.md5(local.read_bytes()).hexdigest()
         if c_hash != l_hash:
-            mismatches.append(f"  {fname}: local differs from canonical")
+            mismatches.append(f"  {fname}: local differs from canonical (md5 mismatch)")
 
-    if mismatches:
+    problems = mismatches + missing_local
+    if problems:
         return CheckResult("BRAND-LIB-SYNC", False,
                            "Shared lib out of sync with canonical",
-                           mismatches + ["  Fix: Run scripts/sync-shared-lib.sh"])
+                           problems + ["  Fix: Run scripts/sync-shared-lib.sh"])
     return CheckResult("BRAND-LIB-SYNC", True, "Shared lib matches canonical")
 
 
@@ -780,6 +924,181 @@ def check_qual_bugs_log(path):
         return CheckResult("QUAL-BUGS-LOG", True, "BUGS_AND_ITERATIONS.md present")
     return CheckResult("QUAL-BUGS-LOG", False, "BUGS_AND_ITERATIONS.md missing",
                        ["  Required by CLAUDE.md for every repo"], severity="warn")
+
+
+# ── Rule #10: No Paid LLM API ────────────────────────────────────────────
+# CLAUDE.md rule #10: all LLM functionality must route through the user's
+# own CLI/subscription (claude -p / codex exec / sparkd) invoked as a local
+# subprocess — never a paid HTTP API billed to the user. This grep gate is
+# a first-pass detector for the most common violation shapes found live in
+# the fleet audit (KI-037); it flags for human review, it does not attempt
+# to auto-fix.
+PAID_API_PATTERNS = [
+    (r'api\.openai\.com', "OpenAI HTTP API endpoint"),
+    (r'api\.anthropic\.com', "Anthropic HTTP API endpoint"),
+    (r'generativelanguage\.googleapis\.com', "Google Gemini HTTP API endpoint"),
+    (r'api\.cohere\.ai', "Cohere HTTP API endpoint"),
+    (r'\bsk-[A-Za-z0-9]{20,}\b', "hardcoded OpenAI-style API key"),
+    (r'\bsk-ant-[A-Za-z0-9\-]{20,}\b', "hardcoded Anthropic API key"),
+    (r'OpenAI\s*\(\s*api_key', "OpenAI SDK client instantiated with api_key (Python)"),
+    (r'anthropic\.Anthropic\s*\(', "Anthropic SDK client instantiated (Python)"),
+    (r'new\s+OpenAI\s*\(', "OpenAI SDK client instantiated (JS/TS)"),
+    (r'new\s+Anthropic\s*\(', "Anthropic SDK client instantiated (JS/TS)"),
+]
+
+# Lines that are clearly documentation/comments about the rule itself, or a
+# deliberately-disabled/stubbed reference, aren't live violations.
+PAID_API_EXCLUDE_HINTS = (
+    "no paid", "never charge", "rule #10", "rule 10", "rule-10",
+    "bring your own key is not", "not implemented", "todo", "example only",
+    "ls-check:test-fixture",
+)
+
+
+def check_qual_paid_api(path):
+    """QUAL-PAID-API: No paid LLM API call sites — rule #10 (local CLI only)."""
+    scan_files = (
+        collect_files(path, ".js") + collect_files(path, ".ts") +
+        collect_files(path, ".py") + collect_files(path, ".swift")
+    )
+    hits = []
+    for f in scan_files:
+        content = read_file_safe(f)
+        for i, line in enumerate(content.splitlines(), 1):
+            lowered = line.lower()
+            if any(hint in lowered for hint in PAID_API_EXCLUDE_HINTS):
+                continue
+            for pattern, label in PAID_API_PATTERNS:
+                if re.search(pattern, line):
+                    hits.append(f"  {f}:{i}: {label} — {line.strip()[:80]}")
+                    break
+
+    if hits:
+        return CheckResult("QUAL-PAID-API", False,
+                           "Paid LLM API call site detected — rule #10 requires local CLI subprocess only",
+                           hits + ["  Fix: route through the user's own CLI (claude -p / codex exec) or sparkd"])
+    return CheckResult("QUAL-PAID-API", True, "No paid LLM API patterns detected")
+
+
+# ── Drift Checks (KI-039, P2-3) ──────────────────────────────────────────
+# Stale claims rot silently once the code that backs them changes: a
+# README's "N tests" figure and a CHANGELOG's latest version entry are both
+# hand-typed copy that nobody re-derives when tests are added or
+# manifest.json is bumped. Two live examples found in the P2 fleet audit:
+# lovespark-love-kana README claimed "39 unit tests" against a grep-verified
+# 73, and astrospark's README badge claimed "20/20" against a grep-verified
+# 49. Both checks are "warn" severity — informational in a normal run,
+# promoted to failures under `ls-check --strict` (the pre-CWS gate),
+# matching the other QUAL-* doc-hygiene checks.
+
+# Ordered most-specific first so a line like "20 / 20 unit tests green"
+# resolves to the numerator via the first pattern, not the generic fallback.
+README_TEST_CLAIM_PATTERNS = [
+    re.compile(r'\b(\d+)\s*/\s*\d+\s+(?:unit\s+)?tests?\b', re.IGNORECASE),
+    re.compile(r'badge/tests?-(\d+)(?:%2F\d+)?-', re.IGNORECASE),
+    re.compile(r'\b(\d+)\+?\s+(?:unit\s+)?tests?\s+(?:green|passing|pass)\b', re.IGNORECASE),
+    re.compile(r'\b(\d+)\+?\s+(?:unit\s+)?tests?\b', re.IGNORECASE),
+]
+
+# Only count test functions in files whose path clearly identifies them as
+# tests (Tests/, *Tests.swift, test_*.py, *.test.js, ...) so a stray
+# production function named e.g. `latest()` or a JS `regex.test(x)` call
+# (no string-literal first arg, so it won't match TEST_FUNC_PATTERNS below
+# anyway) can't inflate the count.
+TEST_FILE_HINT_RE = re.compile(r'test|spec', re.IGNORECASE)
+
+TEST_FUNC_PATTERNS_BY_EXT = {
+    ".swift": re.compile(r'\bfunc\s+test\w*\s*\('),
+    ".py": re.compile(r'\bdef\s+test_?\w*\s*\('),
+    ".js": re.compile(r'\b(?:it|test)\s*\(\s*[\'"`]'),
+    ".ts": re.compile(r'\b(?:it|test)\s*\(\s*[\'"`]'),
+}
+
+
+def _extract_readme_test_claim(line):
+    """Return the first test-count number claimed on a README line, or None."""
+    for pattern in README_TEST_CLAIM_PATTERNS:
+        m = pattern.search(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _count_actual_tests(path):
+    """Grep-count real test functions under test-hinted paths, across languages."""
+    total = 0
+    for ext, pattern in TEST_FUNC_PATTERNS_BY_EXT.items():
+        for f in collect_files(path, ext):
+            if not TEST_FILE_HINT_RE.search(f):
+                continue
+            total += len(pattern.findall(read_file_safe(f)))
+    return total
+
+
+def check_qual_test_drift(path):
+    """QUAL-TEST-DRIFT: README 'N tests' claims vs grep-counted test functions."""
+    readme = Path(path) / "README.md"
+    if not readme.exists():
+        return CheckResult("QUAL-TEST-DRIFT", True, "No README.md to check", severity="warn")
+
+    actual = _count_actual_tests(path)
+    if actual == 0:
+        return CheckResult("QUAL-TEST-DRIFT", True, "No test files found — nothing to compare", severity="warn")
+
+    content = read_file_safe(readme)
+    drifts = []
+    for i, line in enumerate(content.splitlines(), 1):
+        claimed = _extract_readme_test_claim(line)
+        if claimed is not None and claimed != actual:
+            drifts.append(f"  README.md:{i}: claims {claimed} tests, actual grep-counted count is {actual} — {line.strip()[:80]}")
+
+    if drifts:
+        return CheckResult("QUAL-TEST-DRIFT", False,
+                           f"README test-count claim(s) drifted from actual ({actual} test functions found)",
+                           drifts + ["  Fix: update the README claim to match the grep-verified count"],
+                           severity="warn")
+    return CheckResult("QUAL-TEST-DRIFT", True, f"README test-count claims match actual ({actual} tests)")
+
+
+# First markdown heading that contains a version-looking token, e.g.
+# "## [1.2.3] - 2026-07-08", "## v1.2.3", "# 1.2.3".
+CHANGELOG_VERSION_RE = re.compile(r'^#{1,4}\s*\[?v?(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\]?', re.MULTILINE)
+
+
+def _latest_changelog_version(text):
+    m = CHANGELOG_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def check_qual_changelog_drift(path):
+    """QUAL-CHANGELOG-DRIFT: CHANGELOG.md latest version vs manifest.json version."""
+    p = Path(path)
+    changelog = p / "CHANGELOG.md"
+    manifest = p / "manifest.json"
+
+    if not changelog.exists() or not manifest.exists():
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True,
+                           "No CHANGELOG.md + manifest.json pair to compare", severity="warn")
+
+    try:
+        manifest_version = json.loads(manifest.read_text()).get("version")
+    except (json.JSONDecodeError, OSError):
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True, "manifest.json unreadable — skipping", severity="warn")
+
+    if not manifest_version:
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True, "manifest.json has no version field", severity="warn")
+
+    changelog_version = _latest_changelog_version(read_file_safe(changelog))
+    if not changelog_version:
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True,
+                           "CHANGELOG.md has no parseable version heading", severity="warn")
+
+    if changelog_version != str(manifest_version):
+        return CheckResult("QUAL-CHANGELOG-DRIFT", False,
+                           f"CHANGELOG.md latest version ({changelog_version}) != manifest.json version ({manifest_version})",
+                           [f"  Fix: bump manifest.json to {changelog_version}, or add a CHANGELOG.md entry for {manifest_version}"],
+                           severity="warn")
+    return CheckResult("QUAL-CHANGELOG-DRIFT", True, f"CHANGELOG.md matches manifest.json ({manifest_version})")
 
 
 # ── Rust Checks ──────────────────────────────────────────────────────────
@@ -988,7 +1307,7 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
             check_a11y_dialog(html_files),
             check_a11y_expanded(html_files, js_files),
             check_a11y_label(html_files),
-            check_a11y_live(js_files),
+            check_a11y_live(js_files, html_files),
             check_a11y_input(html_files),
             check_a11y_touch(css_files),
             check_a11y_lang(html_files),
@@ -1043,6 +1362,9 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
             check_qual_license(path),
             check_qual_gitignore(path),
             check_qual_bugs_log(path),
+            check_qual_paid_api(path),
+            check_qual_test_drift(path),
+            check_qual_changelog_drift(path),
         ]
 
     # Rust
