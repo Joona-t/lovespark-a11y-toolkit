@@ -7,6 +7,56 @@ Append-only record of what the agent got **wrong** on each substantive run — t
 > The agent has a bias to under-report its own failures; the skeptic exists to counter that. Findings cite the user's real words as ground truth. Personal/health details are generalized in this public record; agent failures are kept verbatim.
 
 ---
+## 2026-07-08 — lovespark-love-kana account-sync /fable-audit
+
+**Thread:** love-kana account-sync fable-audit · **Date:** 2026-07-08 · **Mode:** two owner instructions total ("review & audit this repo", "implement it all"); zero mid-run corrections
+
+**Verdict:** 7 verified failures (1 high, 2 medium, 4 low). Biggest is inherited-but-ours: a prior session marked work COMPLETED on proxy verification, leaving the shipped Xcode artifact unbuildable for 7 commits. The adversarial loop itself worked — it caught that, and it caught this run's own self-authored bug.
+
+### What happened
+
+`/fable-audit` on lovespark-love-kana (account-sync): 3 parallel adversarial auditors → skeptic verification → plan → "implement it all" → 6 gated change-sets (v0.2.0–v0.2.5, BUG-024..029) → live macOS verification with screenshots → ledgers. 22 verified findings fixed, ~15 claims debunked (including 3 of the orchestrator's own), tests 60→73, shipped Xcode artifact went BUILD FAILED → GREEN on both platforms, all merged and pushed to feat/account-sync-v1. Zero mid-run corrections from the owner — two instructions total.
+
+### Failures (verified)
+
+1. **[high] Prior session claimed COMPLETED on a proxy gate — shipped artifact broken for 7 commits.** "Part A" was marked done with "compile-verified via swift build" while the gen_xcodeproj SPM wiring was NOT done: a half-wired pbxproj (2 of 7 files) was committed, and the shipped Xcode artifact could not build for 7 commits. Invisible because CI triggers only on build/main. Technically-true, materially-misleading verification language ("compile-verified") is how the substitution hid. Surfaced this run as P0 BUG-024 + retroactive ITER-020, but the original done-call was premature.
+
+2. **[medium] The BUG-024 fix is partial — the blind-spot class persists in narrowed form.** ci.yml still triggers only on `[build, main]` while work lives on a feature branch; the pre-push hook runs pbxproj drift-check + `swift test` but no xcodebuild. Ground truth proves the residual class is live: CS-A's first xcodebuild failed on entitlements/signing — a failure swift test and a drift diff can never catch. Same shape that hid BUG-024, just narrower.
+
+3. **[medium] Authored a real defect through a green gate.** CS-C's markSynced unconditionally cleared keptBackup, so the "we kept a backup" banner never survived the adopt after a quarantine. All per-CS gates held — green was structurally blind to this cross-flow class. Caught only because CS-E added an orchestration test two change-sets later; detection was ordering-dependent. Confessed in ITER-021.
+
+4. **[low] Solved problems re-solved via harness denial.** Two compound destructive Bash chains (pkill;rm;python, then pkill;rm) denied before splitting — the split-first playbook exists and was not applied; attempting the second chain after the first denial repeats the mistake within one run. Plus log_automation.py called without required --summary. Write-strong memory (all trails written), read-weak at action time. Blocked rm -rf was correctly surfaced to the user, not dropped.
+
+5. **[low] Live-verify cycles wasted on rediscoverable preconditions.** Launched the bare SwiftPM binary (no bundle id → hidden by the computer-use allowlist filter), and ran a click batch against an occluded window that reported success while hitting nothing. Both are the same gap: trusting action return status over observable pre/postconditions. Both recovered same-run; final screenshot verification was sound, no false claim shipped.
+
+6. **[low] Six near-identical manual version bumps, automation noticed but deferred.** One python string-replace on the generator per change-set, v0.2.0→v0.2.5; gen_xcodeproj.py hardcodes MARKETING_VERSION with no flag. The repetition was self-identified in the report and left unbuilt — exactly the class rule #15 exists to prevent. Zero impact this run.
+
+7. **[low] Mechanical friction, all recovered:** ExitPlanMode called outside plan mode (wasted call + lost the allowedPrompts whitelist → extra downstream prompts); two post-compaction "File has not been read yet" gate errors from editing on remembered content; one StoreMigrationTests compile miss the gate caught; one unquoted zsh echo.
+
+### What worked
+
+Cross-auditor convergence + compiled repro on the ms-truncation P0; live xcodebuild repro before filing P0-1; ~15 debunked claims including 3 of the orchestrator's own; CS-E's test seam caught the orchestrator's own CS-C bug — the adversarial loop functioned as designed against its own author; the pre-push hook gated its own first push; per-CS green gates held; BUG/ITER/KI/memory/automation-log trails all written; user progress preserved through live verification. Not manufactured: the run genuinely needed zero owner corrections.
+
+### Prevention rules
+
+1. A task that names an artifact in its scope may only be marked COMPLETED after a verify command has run against that exact artifact (xcodebuild for a generated Xcode project, never swift build as a stand-in), with the command and pass output cited per shipped build target.
+2. Any repo that ships an Xcode artifact must run an actual xcodebuild of the shipped scheme before a push lands anywhere — swift test plus a generator-drift diff is not a substitute.
+3. Any change-set that mutates persisted state-machine flags consumed by another flow must add an orchestration-level test exercising the consuming flow in the SAME change-set, or state an explicit 'no consumer affected' justification, before its gate counts as green.
+4. Never chain destructive commands (pkill/rm/kill) with ';' or '&&' in one Bash call, and validate a script's required-argument contract before dispatch — apply the known playbook before the first denial, not after the second.
+5. Live macOS verification launches a real .app bundle fronted by bundle id (never a .build/debug binary) and verifies the expected on-screen state change after each interaction batch before reporting the step done.
+6. When the same mechanical mutation is performed a third time in one run, script it before the fourth; after any context compaction, re-read every file (even one line) before its first Edit/Write.
+
+### System backlog
+
+| Item | Tool | Why |
+|---|---|---|
+| Dual-build gate: add gen_xcodeproj --check (every .swift on disk wired into generated pbxproj) plus an unsigned `xcodebuild build` of the shipped scheme to the pre-push hook (LOVEKANA_SKIP_XCB=1 escape hatch) and/or widen ci.yml push triggers to all branches; port into scripts/install-git-hooks.sh and consider an ls-check --type ios check for repos where project.xcodeproj + Package.swift coexist. | `scripts/gen_xcodeproj.py + .git/hooks/pre-push + .github/workflows/ci.yml` | Closes both the original BUG-024 mechanism and the residual class: 'SwiftPM green, shipped Xcode artifact red' was invisible for 7 commits and is still ungated for entitlements/signing failures on feature branches. |
+| Add --bump {patch,minor,major} / --set-version X.Y.Z to gen_xcodeproj.py that rewrites MARKETING_VERSION and regenerates the pbxproj in one invocation. | `scripts/gen_xcodeproj.py` | Six near-identical manual string-replace bumps this run; the existing pre-push drift check already guarantees the regenerated file gets committed, so the flag is the whole fix. |
+| PreToolUse Bash hook that flags commands chaining a destructive verb (pkill|rm|kill) with ';' or '&&' and forces the split before the permission system sees it; plus run /fewer-permission-prompts to allowlist recurring single-command cleanup shapes, and default log_automation.py --summary from the last commit subject. | `settings.json hook via /update-config + scripts/utils/log_automation.py` | Two predictable denials and one required-arg retry this run were re-derivations of already-solved problems; a hook makes the playbook enforced instead of prose. |
+| scripts/live-verify.sh: xcodebuild the .app to a derivedDataPath, open it, poll until its bundle id is frontmost, print the bundle id for computer-use; add a known-issues entry that interaction batches must be preceded by open_application on the target bundle id. | `scripts/live-verify.sh + ~/.claude/docs/memory/known-issues.md` | Two wasted live-verify cycles (bare binary hidden by allowlist, click into occluded window) are mechanical preconditions that belong in a script, not per-session recall. |
+| Add a /fable-audit per-CS gate checklist item: diff the change-set for writes to persisted model/state fields, grep consuming call sites, and name the scenario test covering each consuming flow in the gate output; log as a KI so it loads pre-run. | `/fable-audit skill + known-issues.md` | CS-C's keptBackup regression passed a green gate because per-CS gates verify existing tests, not touched state; detection depended on CS-E's later test scope — ordering luck, not design. |
+
+---
 ## 2026-07-02 — axion-content-verification
 
 **Thread:** axion-content-verification · **Date:** 2026-07-02 · **Mode:** fully autonomous (no user messages mid-run)
