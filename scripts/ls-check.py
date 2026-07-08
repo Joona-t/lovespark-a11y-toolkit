@@ -859,6 +859,7 @@ PAID_API_PATTERNS = [
 PAID_API_EXCLUDE_HINTS = (
     "no paid", "never charge", "rule #10", "rule 10", "rule-10",
     "bring your own key is not", "not implemented", "todo", "example only",
+    "ls-check:test-fixture",
 )
 
 

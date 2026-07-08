@@ -58,3 +58,27 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
   fallbacks again. Batch-running `sync-shared-lib.sh` across the fleet with this instrument
   fixed (rather than broken) is the follow-up — flagged separately since it touches ~20 other
   repos outside this unit's assigned scope.
+
+## 2026-07-08 — KI-038: QUAL-PAID-API self-audit false positive broke CI (P1-3)
+
+- Problem: The CI workflow's `python scripts/ls-check.py . --type python --strict` step —
+  self-auditing this repo — started failing right after KI-037 landed. `QUAL-PAID-API` flagged
+  `tests/test_agent_ready_toolkit.py:108`, the deliberately "dirty" fixture string
+  (`"const client = new OpenAI({ apiKey: 'sk-...' })"`) that
+  `test_qual_paid_api_flags_known_violation_and_passes_clean` writes into a *separate* tmp
+  project directory to assert the checker catches real violations. `ls-check.py`'s own file
+  scan doesn't distinguish "text that becomes a fixture file in a subprocess" from "live source
+  code" — it just greps every `.py` file in the repo, including its own test file, and matched
+  the fixture string as if it were a real call site in this repo's source.
+- Root cause: the fixture-vs-live-code distinction has no signal `QUAL-PAID-API`'s line scanner
+  can see; the existing `PAID_API_EXCLUDE_HINTS` mechanism (used elsewhere in the fleet, e.g.
+  primordial's `# paid-api-gate:doc-ref` convention) covers doc/comment references but had no
+  entry for "test fixture."
+- Fix: tagged the fixture line with an inline `# ls-check:test-fixture (KI-037 dirty fixture,
+  not live code)` comment and added `"ls-check:test-fixture"` to `PAID_API_EXCLUDE_HINTS` in
+  `scripts/ls-check.py`. Verified locally: full CI step sequence (`pytest -q` → `py_compile` →
+  `ls-check.py . --type python --strict` → `audit-contrast.py --mode tokens --json`) all green
+  — 10 pytest passed, ls-check 7/7 pass, audit-contrast 64/64 pass, exit 0.
+- Prevention: any future fixture string that deliberately trips a `QUAL-*` grep-based check
+  should carry the matching `ls-check:*` exclude-hint tag on the same physical line so the
+  self-audit doesn't flag its own test suite.

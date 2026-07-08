@@ -105,7 +105,7 @@ def test_qual_paid_api_flags_known_violation_and_passes_clean(tmp_path):
     project_dirty.mkdir()
     (project_dirty / "manifest.json").write_text('{"manifest_version": 3}')
     (project_dirty / "background.js").write_text(
-        "const client = new OpenAI({ apiKey: 'sk-abcdefghijklmnopqrstuvwx' });\n"
+        "const client = new OpenAI({ apiKey: 'sk-abcdefghijklmnopqrstuvwx' });\n"  # ls-check:test-fixture (KI-037 dirty fixture, not live code)
     )
 
     result = run_cmd(sys.executable, "scripts/ls-check.py", str(project_dirty), "--only", "quality", "--json")
