@@ -88,7 +88,10 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
   `astrospark` README (badge + two prose mentions) corrected from 20/20 to 49/49 (grep-verified).
   Verified: `ls-check . --only quality --json` reports `QUAL-TEST-DRIFT` passing on both repos
   post-fix. Full self-audit gate green: 12 pytest passed, `py_compile` clean, `ls-check --strict`
-  9/9 pass, `audit-contrast` 64/64 pass.
+  9/9 pass, `audit-contrast` 64/64 pass. **CORRECTED 2026-07-08, see KI-040 below: this "9/9
+  pass" was measured against this repo's local `scripts/ls-check.py` copy, not the canonical
+  installed `ls-check` binary the fleet actually runs — the real command failed 6/9. Do not
+  trust this line as evidence of a passing self-audit; see KI-040.**
 - Prevention: `QUAL-TEST-DRIFT` and `QUAL-CHANGELOG-DRIFT` now catch both drift classes on every
   future `ls-check --strict` run (the pre-CWS gate), so a stale test count or version mismatch
   fails the gate instead of shipping silently. The regex-based grep count is deliberately
@@ -118,3 +121,42 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
 - Prevention: any future fixture string that deliberately trips a `QUAL-*` grep-based check
   should carry the matching `ls-check:*` exclude-hint tag on the same physical line so the
   self-audit doesn't flag its own test suite.
+
+## 2026-07-08 — KI-040: KI-039's "ls-check --strict 9/9 pass" claim was measured against the wrong binary
+
+- Problem: Fleet audit unit P2-lscheck-drift found that the real, installed `ls-check` command
+  (`/usr/local/bin/ls-check`, which resolves to the canonical
+  `Claude x LoveSpark/scripts/ls-check.py` — the copy CI and every other repo in the fleet
+  actually invoke) reported **6 pass / 3 fail** under `--strict` at commit `91bbc0d`, directly
+  contradicting the "ls-check --strict 9/9 pass" line logged in the KI-039 entry above. The
+  claim was not fabricated so much as measured on the wrong artifact: `python3 scripts/ls-check.py
+  . --strict` (this repo's own vendored copy) genuinely returns 9/9, but nobody re-ran the
+  self-audit through the actual installed `ls-check` binary before writing that line down.
+- Root cause: this toolkit's `scripts/ls-check.py` is a deliberate fork of the canonical copy
+  (see CLAUDE.md "fork discipline" — not a byte-sync target, fixes are ported function-by-
+  function). Two fixes that already existed in this repo's fork had never been ported to the
+  canonical copy: (1) KI-038's `"ls-check:test-fixture"` entry in `PAID_API_EXCLUDE_HINTS`,
+  causing `QUAL-PAID-API` to genuinely false-positive on this repo's own dirty test fixture
+  under the canonical binary; and (2) the `/tests/` + `/scripts/` path exclusion in
+  `check_python_typehints`/`check_python_docstrings` (present in this fork since the very first
+  `ls-check.py` commit, `39233a7`), so the canonical copy was scoring type-hint/docstring
+  coverage over this repo's `tests/` directory too — tanking `PY-TYPEHINTS` to 16/109 (15%) and
+  flagging 16 "missing docstrings" that were all test helper functions never meant to be
+  covered by that check.
+- Fix: ported both fixes into `Claude x LoveSpark/scripts/ls-check.py` (outside git — a shared,
+  non-version-controlled canonical location, not a separate repo) per fork discipline: added
+  the `"ls-check:test-fixture"` hint to its `PAID_API_EXCLUDE_HINTS`, and the same `/tests/` +
+  `/scripts/` path exclusion to both Python-quality functions, each with an inline comment
+  noting it was ported from this fork. Bumped canonical `TOOL_VERSION` from `1.1.0` to `1.1.1`
+  (its own stale-install convention) so `ls-check --version`'s hash reflects the change.
+  Nothing needed changing in this repo's own `scripts/ls-check.py` — it already had both fixes;
+  the drift was entirely canonical lagging behind the fork. Verified with the actual installed
+  command: `ls-check . --strict` now genuinely reports **9 pass, 0 fail, 0 warn** (confirmed via
+  `ls-check --version` showing the new `1.1.1` hash, not a stale cached binary). Also re-ran the
+  full local gate for completeness: 12 pytest passed, `py_compile` clean, `audit-contrast --mode
+  tokens --json` 64/64 pass.
+- Prevention: the self-audit gate step in this repo's CI/dev workflow should invoke `ls-check`
+  (the installed binary that resolves to canonical) rather than
+  `python3 scripts/ls-check.py`, or explicitly document that the two can diverge and only the
+  canonical run is the claim of record. Any future "N/N pass" line logged in this file for
+  `ls-check --strict` should note which binary/path produced it if there's any ambiguity.
