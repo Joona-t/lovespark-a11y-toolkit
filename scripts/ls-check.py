@@ -888,6 +888,127 @@ def check_qual_paid_api(path):
     return CheckResult("QUAL-PAID-API", True, "No paid LLM API patterns detected")
 
 
+# ── Drift Checks (KI-039, P2-3) ──────────────────────────────────────────
+# Stale claims rot silently once the code that backs them changes: a
+# README's "N tests" figure and a CHANGELOG's latest version entry are both
+# hand-typed copy that nobody re-derives when tests are added or
+# manifest.json is bumped. Two live examples found in the P2 fleet audit:
+# lovespark-love-kana README claimed "39 unit tests" against a grep-verified
+# 73, and astrospark's README badge claimed "20/20" against a grep-verified
+# 49. Both checks are "warn" severity — informational in a normal run,
+# promoted to failures under `ls-check --strict` (the pre-CWS gate),
+# matching the other QUAL-* doc-hygiene checks.
+
+# Ordered most-specific first so a line like "20 / 20 unit tests green"
+# resolves to the numerator via the first pattern, not the generic fallback.
+README_TEST_CLAIM_PATTERNS = [
+    re.compile(r'\b(\d+)\s*/\s*\d+\s+(?:unit\s+)?tests?\b', re.IGNORECASE),
+    re.compile(r'badge/tests?-(\d+)(?:%2F\d+)?-', re.IGNORECASE),
+    re.compile(r'\b(\d+)\+?\s+(?:unit\s+)?tests?\s+(?:green|passing|pass)\b', re.IGNORECASE),
+    re.compile(r'\b(\d+)\+?\s+(?:unit\s+)?tests?\b', re.IGNORECASE),
+]
+
+# Only count test functions in files whose path clearly identifies them as
+# tests (Tests/, *Tests.swift, test_*.py, *.test.js, ...) so a stray
+# production function named e.g. `latest()` or a JS `regex.test(x)` call
+# (no string-literal first arg, so it won't match TEST_FUNC_PATTERNS below
+# anyway) can't inflate the count.
+TEST_FILE_HINT_RE = re.compile(r'test|spec', re.IGNORECASE)
+
+TEST_FUNC_PATTERNS_BY_EXT = {
+    ".swift": re.compile(r'\bfunc\s+test\w*\s*\('),
+    ".py": re.compile(r'\bdef\s+test_?\w*\s*\('),
+    ".js": re.compile(r'\b(?:it|test)\s*\(\s*[\'"`]'),
+    ".ts": re.compile(r'\b(?:it|test)\s*\(\s*[\'"`]'),
+}
+
+
+def _extract_readme_test_claim(line):
+    """Return the first test-count number claimed on a README line, or None."""
+    for pattern in README_TEST_CLAIM_PATTERNS:
+        m = pattern.search(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _count_actual_tests(path):
+    """Grep-count real test functions under test-hinted paths, across languages."""
+    total = 0
+    for ext, pattern in TEST_FUNC_PATTERNS_BY_EXT.items():
+        for f in collect_files(path, ext):
+            if not TEST_FILE_HINT_RE.search(f):
+                continue
+            total += len(pattern.findall(read_file_safe(f)))
+    return total
+
+
+def check_qual_test_drift(path):
+    """QUAL-TEST-DRIFT: README 'N tests' claims vs grep-counted test functions."""
+    readme = Path(path) / "README.md"
+    if not readme.exists():
+        return CheckResult("QUAL-TEST-DRIFT", True, "No README.md to check", severity="warn")
+
+    actual = _count_actual_tests(path)
+    if actual == 0:
+        return CheckResult("QUAL-TEST-DRIFT", True, "No test files found — nothing to compare", severity="warn")
+
+    content = read_file_safe(readme)
+    drifts = []
+    for i, line in enumerate(content.splitlines(), 1):
+        claimed = _extract_readme_test_claim(line)
+        if claimed is not None and claimed != actual:
+            drifts.append(f"  README.md:{i}: claims {claimed} tests, actual grep-counted count is {actual} — {line.strip()[:80]}")
+
+    if drifts:
+        return CheckResult("QUAL-TEST-DRIFT", False,
+                           f"README test-count claim(s) drifted from actual ({actual} test functions found)",
+                           drifts + ["  Fix: update the README claim to match the grep-verified count"],
+                           severity="warn")
+    return CheckResult("QUAL-TEST-DRIFT", True, f"README test-count claims match actual ({actual} tests)")
+
+
+# First markdown heading that contains a version-looking token, e.g.
+# "## [1.2.3] - 2026-07-08", "## v1.2.3", "# 1.2.3".
+CHANGELOG_VERSION_RE = re.compile(r'^#{1,4}\s*\[?v?(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\]?', re.MULTILINE)
+
+
+def _latest_changelog_version(text):
+    m = CHANGELOG_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def check_qual_changelog_drift(path):
+    """QUAL-CHANGELOG-DRIFT: CHANGELOG.md latest version vs manifest.json version."""
+    p = Path(path)
+    changelog = p / "CHANGELOG.md"
+    manifest = p / "manifest.json"
+
+    if not changelog.exists() or not manifest.exists():
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True,
+                           "No CHANGELOG.md + manifest.json pair to compare", severity="warn")
+
+    try:
+        manifest_version = json.loads(manifest.read_text()).get("version")
+    except (json.JSONDecodeError, OSError):
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True, "manifest.json unreadable — skipping", severity="warn")
+
+    if not manifest_version:
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True, "manifest.json has no version field", severity="warn")
+
+    changelog_version = _latest_changelog_version(read_file_safe(changelog))
+    if not changelog_version:
+        return CheckResult("QUAL-CHANGELOG-DRIFT", True,
+                           "CHANGELOG.md has no parseable version heading", severity="warn")
+
+    if changelog_version != str(manifest_version):
+        return CheckResult("QUAL-CHANGELOG-DRIFT", False,
+                           f"CHANGELOG.md latest version ({changelog_version}) != manifest.json version ({manifest_version})",
+                           [f"  Fix: bump manifest.json to {changelog_version}, or add a CHANGELOG.md entry for {manifest_version}"],
+                           severity="warn")
+    return CheckResult("QUAL-CHANGELOG-DRIFT", True, f"CHANGELOG.md matches manifest.json ({manifest_version})")
+
+
 # ── Rust Checks ──────────────────────────────────────────────────────────
 
 def check_rust_clippy(path):
@@ -1150,6 +1271,8 @@ def run_checks(path, project_type, pre_commit=False, only_category=None):
             check_qual_gitignore(path),
             check_qual_bugs_log(path),
             check_qual_paid_api(path),
+            check_qual_test_drift(path),
+            check_qual_changelog_drift(path),
         ]
 
     # Rust

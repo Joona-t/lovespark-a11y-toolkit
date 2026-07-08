@@ -125,6 +125,47 @@ def test_qual_paid_api_flags_known_violation_and_passes_clean(tmp_path):
     assert qual_ids["QUAL-PAID-API"]["passed"] is True
 
 
+def test_qual_test_drift_flags_stale_readme_count(tmp_path):
+    """KI-039: README 'N tests' claims must match the grep-counted test-function count."""
+    project = tmp_path / "test-drift"
+    (project / "Tests").mkdir(parents=True)
+    (project / "README.md").write_text("swift test  # 2 unit tests\n")
+    (project / "Tests" / "FooTests.swift").write_text(
+        "func testA() {}\nfunc testB() {}\nfunc testC() {}\n"
+    )
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-TEST-DRIFT"]["passed"] is False
+    assert "3 test functions" in qual_ids["QUAL-TEST-DRIFT"]["message"]
+
+    (project / "README.md").write_text("swift test  # 3 unit tests\n")
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-TEST-DRIFT"]["passed"] is True
+
+
+def test_qual_changelog_drift_flags_stale_manifest_version(tmp_path):
+    """KI-039: CHANGELOG.md's latest version heading must match manifest.json's version."""
+    project = tmp_path / "changelog-drift"
+    project.mkdir()
+    (project / "manifest.json").write_text('{"manifest_version": 3, "version": "1.0.0"}')
+    (project / "CHANGELOG.md").write_text("## [1.1.0] - 2026-07-08\n- bumped stuff\n")
+
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-CHANGELOG-DRIFT"]["passed"] is False
+
+    (project / "manifest.json").write_text('{"manifest_version": 3, "version": "1.1.0"}')
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(project), "--only", "quality", "--json")
+    data = json.loads(result.stdout)
+    qual_ids = {c["id"]: c for c in data["categories"]["quality"]}
+    assert qual_ids["QUAL-CHANGELOG-DRIFT"]["passed"] is True
+
+
 def test_integrations_exist_and_are_agent_safe():
     hermes = ROOT / "integrations" / "hermes" / "SKILL.md"
     openclaw = ROOT / "integrations" / "openclaw" / "audit-a11y.md"

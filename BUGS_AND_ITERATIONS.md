@@ -59,6 +59,42 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
   fixed (rather than broken) is the follow-up — flagged separately since it touches ~20 other
   repos outside this unit's assigned scope.
 
+## 2026-07-08 — KI-039: no drift check for README test-count claims or CHANGELOG/manifest version (P2-3)
+
+- Problem: The fleet audit found two silently stale doc claims: `lovespark-love-kana`'s README
+  said `swift test # 39 unit tests` while the repo actually had 73 test functions, and
+  `astrospark`'s README badge/status line claimed `20/20` unit tests against a real count of 49.
+  Nothing in `ls-check` compared a README's hand-typed test-count claim against the actual test
+  suite, and nothing compared a `CHANGELOG.md`'s latest version entry against `manifest.json`'s
+  `version` field, so both classes of drift accrue silently exactly like the CSS-token drift
+  fixed in KI-037.
+- Root cause: doc claims (README test counts, CHANGELOG version headers) are hand-written at the
+  moment a feature lands and nobody re-derives them later — there was no automated check wired
+  into the `quality` category (the one category that runs across every project type) to catch
+  either drift class.
+- Fix: added `QUAL-TEST-DRIFT` (grep-counts `func test*`/`def test_*`/`it('...')`/`test('...')`
+  under test-hinted paths — `Tests/`, `*Tests.swift`, `test_*.py`, etc. — across `.swift`/`.py`/
+  `.js`/`.ts`, then flags any README.md line whose claimed "N tests" figure, badge, or "N/N
+  tests" phrasing doesn't match) and `QUAL-CHANGELOG-DRIFT` (parses the first version-looking
+  markdown heading in `CHANGELOG.md` and compares it against `manifest.json`'s `version` field)
+  to `scripts/ls-check.py`'s `quality` category, wired into the existing `--strict` gate per
+  fork discipline — same functions ported byte-identical into the canonical
+  `Claude x LoveSpark/scripts/ls-check.py` copy. Both are `severity="warn"` (informational in a
+  normal run, promoted to failures under `--strict`, matching the other `QUAL-*` doc-hygiene
+  checks) so they don't break existing green CI runs that haven't opted into `--strict` yet.
+  Added two fixture tests (`test_qual_test_drift_flags_stale_readme_count`,
+  `test_qual_changelog_drift_flags_stale_manifest_version`). Then fixed the two live findings:
+  `lovespark-love-kana` README + `audit-meta.yml` corrected from 39 to 73 (grep-verified), and
+  `astrospark` README (badge + two prose mentions) corrected from 20/20 to 49/49 (grep-verified).
+  Verified: `ls-check . --only quality --json` reports `QUAL-TEST-DRIFT` passing on both repos
+  post-fix. Full self-audit gate green: 12 pytest passed, `py_compile` clean, `ls-check --strict`
+  9/9 pass, `audit-contrast` 64/64 pass.
+- Prevention: `QUAL-TEST-DRIFT` and `QUAL-CHANGELOG-DRIFT` now catch both drift classes on every
+  future `ls-check --strict` run (the pre-CWS gate), so a stale test count or version mismatch
+  fails the gate instead of shipping silently. The regex-based grep count is deliberately
+  conservative (test-hinted file paths only, string-literal-first-arg for JS `it()`/`test()`) to
+  avoid false positives on unrelated code (e.g. `regex.test(x)` calls).
+
 ## 2026-07-08 — KI-038: QUAL-PAID-API self-audit false positive broke CI (P1-3)
 
 - Problem: The CI workflow's `python scripts/ls-check.py . --type python --strict` step —
