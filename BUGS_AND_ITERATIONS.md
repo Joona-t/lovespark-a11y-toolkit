@@ -10,6 +10,29 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
 **Fix:** What was done to resolve it
 -->
 
+## 2026-10-07 — BUG-001: public ledger leaked a machine path + un-generalized health detail (PR #4)
+
+- **Problem:** `ledger/AGENT-AUDIT-LEDGER.md` (PR #4) carried an absolute macOS home-directory path (`/Use[r]s/<name>/Projects/axion-physics/...`) in the 2026-07-02 system-backlog table, and its copy of the 2026-06-25 AI-Psychosis entry used raw personal health wording (an exhausted user's sleep/food state, quoted verbatim) that PR #1 had already generalized for this public repo — contradicting the ledger's own header ("Personal/health details are generalized").
+- **Root cause:** PR #4's own first commit `6de6003` ("ledger: axion-content-verification audit entry") introduced both leaks: it rewrote the already-generalized 2026-06-25 AI-Psychosis lines back to raw health wording, and the audit synthesizer wrote a local absolute path into a backlog row. PR #1's commits (`1f75f65`, `1b6f6bb`) never contained either. Every later PR #4 commit up to `e8337d0` carried them; only `4be4a25` scrubs them. Nothing scanned the ledger for home-directory paths before push. _(Corrected 2026-10-07, see BUG-002: an earlier version of this line wrongly blamed PR #1 `1f75f65`.)_
+- **Reproducible check:** `git log --oneline -G'9[0]h' -- ledger/` and `git log --oneline -G'/Use[r]s/' -- ledger/` each list only `6de6003` (introduced) and `4be4a25` (removed).
+- **Fix:** Path rewritten repo-relative (`axion-physics/scripts/validate-content.js`); the 4 drifted lines restored to PR #1's generalized wording. Regression test `tests/test_public_hygiene.py::test_ledger_has_no_machine_specific_home_paths` — fails on the pre-fix ledger (1 failed), passes after (1 passed). Reproducible check: `git grep -nE '/Use[r]s/' -- ledger/` → 0 hits.
+- **Prevention:** the test runs in CI on every push. Wording drift stays a human review item (the header's promise). Pre-existing home-directory paths in `commands/audit-a11y.md:38` and `commands/build-accessible.md:113` are on `main` already and out of this PR's scope.
+- _Placed above the chronological list on purpose: sibling PRs (#2/#3/#5) all append KI entries at the end of this file, so appending here would conflict with every one of them._
+
+## 2026-10-07 — BUG-003: BUGS_AND_ITERATIONS.md itself quoted the health wording it reported (PR #4)
+
+- **Problem:** BUG-001/BUG-002 quoted the scrubbed health wording verbatim (in the problem text and in `git log -S` / `git grep` check commands), so the PR head still put that personal detail on public `main` under any merge method — 3 hits for the raw hours token in this file, 0 on `origin/main`. The same entries also spelled out the literal home-directory prefix.
+- **Root cause:** The scrub (`4be4a25`) and the regression test only covered `ledger/`. Writing a check command that greps for a literal string puts that literal string in the repo.
+- **Fix:** BUG-001/BUG-002 reworded to generalized language ("an exhausted user"); check commands use bracket patterns (`9[0]h`, `/Use[r]s/`) that match the leak without containing it. New regression test `tests/test_public_hygiene.py::test_tracked_files_have_no_raw_health_wording` scans every tracked text file (not just `ledger/`); the home-path test regex uses the same bracket trick so the test file stays clean.
+- **Reproducible check:** `git grep -niE '9[0]h|fast[i]ng|24h-awak[e]'` → 0 lines; `git grep -nE '/Use[r]s/' -- BUGS_AND_ITERATIONS.md README.md commands/audit-ledger.md ledger/ tests/test_public_hygiene.py workflows/thread-audit-ledger.js` → 0 lines; `python -m pytest -q tests/test_public_hygiene.py` → 2 passed. Merge with `--squash` (older branch commits still contain the wording).
+
+## 2026-10-07 — BUG-002: BUG-001 blamed the wrong commit; tip-only scrub leaves the leak in branch history (PR #4)
+
+- **Problem:** (1) BUG-001's root cause said PR #1 commit `1f75f65` held the raw wording. False: `1f75f65` and `1b6f6bb` have 0 hits; PR #4's `6de6003` introduced it. (2) `4be4a25` only scrubs the tip. Commits `6de6003`..`e8337d0` still hold the raw health wording and the absolute path, so a merge-commit merge of PR #4 would carry them into `main`'s public history.
+- **Root cause:** The root-cause sentence was written from memory, not from `git log -S`. Nobody checked per-commit history, only the tip.
+- **Fix:** BUG-001's root cause now cites `6de6003` and includes the `git log -S` check. **PR #4 must be merged with `--squash`** so `main` gets only the scrubbed tree. Rewriting the branch history needs a force-push, which needs Joona's explicit OK. The PR's own commits stay visible on GitHub either way.
+- **Reproducible check (after squash-merging):** `git log --oneline -G'9[0]h' origin/main -- ledger/` and `git log --oneline -G'/Use[r]s/' origin/main -- ledger/` → 0 lines. Per commit: `for c in $(git rev-list origin/main..HEAD); do git grep -c -E '9[0]h' ${c} -- ledger/; done` shows which PR commits still carry the wording.
+
 ## 2026-05-23 — Agent-ready toolkit packaging
 
 - Problem: The accessibility toolkit was useful but not installable, fixture-tested, or agent-ready.
