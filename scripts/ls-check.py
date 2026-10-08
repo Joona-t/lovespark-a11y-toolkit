@@ -690,6 +690,9 @@ def check_mv3_storage_key(js_files):
         for m in re.finditer(r"storage\.local\.get\(\s*\[([^\]]+)\]", content):
             for k in re.findall(r"['\"](\w+)['\"]", m.group(1)):
                 get_keys.add(k)
+        # Single-key reads: get('key') / get("key")
+        for m in re.finditer(r"storage\.local\.get\(\s*['\"](\w+)['\"]", content):
+            get_keys.add(m.group(1))
         # Keys persisted via the shared lifecycle: `initDefaults(DEFAULTS)` writes
         # the whole DEFAULTS object literal to storage, so its keys ARE set. Without
         # this the rule false-flags every defaulted key (theme, stat counters) as
