@@ -2,7 +2,7 @@
 """LoveSpark Contrast Audit — WCAG 2.1 contrast checker for all 4 themes.
 
 Zero external dependencies. Uses relative luminance formula per WCAG 2.1.
-Reads token values from canonical lovespark-base.css when available,
+Reads token values from canonical lovespark-tokens.css when available,
 falls back to hardcoded values otherwise.
 
 Features:
@@ -12,7 +12,7 @@ Features:
 
 Usage:
     python3 audit-contrast.py [--theme THEME] [--verbose] [--json] [--history]
-    python3 audit-contrast.py --css /path/to/lovespark-base.css --verbose
+    python3 audit-contrast.py --css /path/to/lovespark-tokens.css --verbose
 """
 
 import argparse
@@ -23,16 +23,62 @@ import sys
 from datetime import date
 
 # ── Canonical CSS Path ─────────────────────────────────────────────────────
+# KI-037: CSS_FILE used to be a single hardcoded "one level up" relative
+# path, which broke silently the moment this toolkit was extracted into its
+# own repo (Apps & Tools/lovespark-a11y-toolkit is two levels below
+# "Claude x LoveSpark", not one). find_shared_lib() walks up from this
+# script's location until it finds Extensions/infrastructure/
+# lovespark-shared-lib, so it keeps working regardless of how deep this
+# toolkit is nested. LOVESPARK_SHARED_LIB env var always wins when set.
+#
+# KI-037b: even after the path resolved, the parser targeted
+# lovespark-base.css, which no longer holds the :root/body.theme-* color
+# tokens — those now live in lovespark-tokens.css (a later shared-lib
+# split). Confirmed live: pointing at lovespark-base.css parsed 0 tokens
+# and silently fell through to hardcoded values every run, the exact
+# failure mode the audit flagged. Target lovespark-tokens.css instead.
 
-CSS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "Extensions", "infrastructure", "lovespark-shared-lib",
-    "lovespark-base.css"
+
+def find_shared_lib(start_dir=None):
+    """Locate the canonical lovespark-shared-lib directory.
+
+    Resolution order:
+      1. LOVESPARK_SHARED_LIB env var, if set (explicit override, no checks)
+      2. Walk up from start_dir looking for
+         <ancestor>/Extensions/infrastructure/lovespark-shared-lib
+      3. None if neither resolves (callers must handle the fallback)
+    """
+    override = os.environ.get("LOVESPARK_SHARED_LIB")
+    if override:
+        return override
+
+    current = os.path.abspath(start_dir or os.path.dirname(os.path.abspath(__file__)))
+    while True:
+        candidate = os.path.join(
+            current, "Extensions", "infrastructure", "lovespark-shared-lib"
+        )
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+_SHARED_LIB_DIR = find_shared_lib()
+CSS_FILE = (
+    os.path.join(_SHARED_LIB_DIR, "lovespark-tokens.css")
+    if _SHARED_LIB_DIR
+    else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "Extensions", "infrastructure", "lovespark-shared-lib",
+        "lovespark-tokens.css",
+    )
 )
 
 # ── Theme Palettes (hardcoded fallbacks) ───────────────────────────────────
 # These serve as documentation AND fallback when CSS file isn't available.
-# CSS parser overrides these with live values from lovespark-base.css.
+# CSS parser overrides these with live values from lovespark-tokens.css.
 
 THEMES = {
     "retro": {
@@ -172,7 +218,7 @@ def parse_css_vars(block_text):
 
 
 def parse_base_css(path, verbose=False):
-    """Parse lovespark-base.css and apply values to THEMES dict.
+    """Parse lovespark-tokens.css and apply values to THEMES dict.
 
     Returns the number of tokens overridden, or -1 if file not found.
     """
@@ -559,7 +605,7 @@ def main():
     parser.add_argument(
         "--css",
         default=CSS_FILE,
-        help="Path to lovespark-base.css (default: canonical shared lib)",
+        help="Path to lovespark-tokens.css (default: canonical shared lib)",
     )
     parser.add_argument(
         "--hardcoded",
