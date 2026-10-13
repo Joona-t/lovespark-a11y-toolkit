@@ -70,7 +70,7 @@ HISTORY_PATH = None  # set per project in main()
 # --version` prints this plus a sha256 of THIS file, so you can confirm which
 # build is installed and detect a stale console script (compare the installed
 # hash against the toolkit repo's HEAD scripts/ls-check.py). See KI-LS1.
-TOOL_VERSION = "0.1.2"
+TOOL_VERSION = "0.1.3"
 
 
 def _version_string():
@@ -964,7 +964,11 @@ def check_perm_missing(path, js_files):
     # chrome.tabs.* metadata (url/title) is granted by `tabs`, by `activeTab` (popup gesture),
     # or by any host permission. Treat those as satisfying the `tabs` requirement so the check
     # doesn't steer extensions toward the broader, CWS-scrutinized `tabs` permission. (LS-1)
-    tabs_satisfied = "activeTab" in perms or bool(host_perms)
+    # Content-script match patterns are "scriptable hosts": Chrome grants them host
+    # access too (tab.url is populated, scripting.executeScript works), so they satisfy
+    # `tabs` the same way host_permissions do. (LS-2)
+    cs_hosts = [m for cs in data.get("content_scripts", []) for m in cs.get("matches", [])]
+    tabs_satisfied = "activeTab" in perms or bool(host_perms) or bool(cs_hosts)
 
     missing = []
     for api, perm in api_perm_map.items():
