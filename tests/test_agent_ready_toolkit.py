@@ -311,3 +311,24 @@ def test_perm_unused_exempts_declarativenetrequest_via_manifest_key(tmp_path):
     result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
     assert "'declarativeNetRequest' declared but" not in result.stdout, result.stdout
     assert "'alarms' declared but" in result.stdout, result.stdout
+
+
+def test_perm_missing_accepts_content_script_hosts_without_tabs(tmp_path):
+    # LS-2: content_scripts `matches` grant host access exactly like host_permissions
+    # (Chrome "scriptable hosts"), so chrome.tabs.query + scripting.executeScript from a
+    # background worker must NOT be flagged PERM-MISSING for `tabs`. Regression for the
+    # lovespark-retro-cursor 1.1.38 install-time injection fix (2026-10-13).
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "manifest_version": 3,
+        "name": "demo",
+        "version": "1.0",
+        "permissions": ["storage", "scripting"],
+        "content_scripts": [{"matches": ["<all_urls>"], "js": ["cs.js"]}],
+        "background": {"service_worker": "bg.js"},
+    }))
+    (tmp_path / "cs.js").write_text("document.title;")
+    (tmp_path / "bg.js").write_text(
+        "chrome.tabs.query({}, (tabs) => { chrome.scripting.executeScript({target: {tabId: 1}, files: ['cs.js']}); });"
+    )
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
+    assert "'chrome.tabs.query' used but 'tabs'" not in result.stdout, result.stdout

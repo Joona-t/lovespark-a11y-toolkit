@@ -209,3 +209,10 @@ _No entries yet. Document bugs, fixes, and iterations here as they occur._
   Installed `ls-check --version` confirms 1.1.2 (shim execs canonical directly).
 - Prevention: any future HTML-structural check (ancestor/descendant relationships) must use the
   `_LiveRegionScanner` stack-walk pattern, not flat regex over tags — regex sees tags, not trees.
+
+## 2026-10-13 — LS-2: PERM-MISSING false positive — content-script hosts not counted as host access
+
+- **Problem:** `lovespark-retro-cursor` 1.1.38 added install-time `chrome.scripting.executeScript` into open tabs (needs `chrome.tabs.query`). ls-check demanded the `tabs` permission even though the manifest's `content_scripts.matches: ["<all_urls>"]` already grants host access — `tabs.query` needs no permission at all, and `tab.url` is populated for scriptable hosts. A 3-skeptic review of that fix flagged `tabs` as unused (and a new Firefox install warning), so the gate was pushing toward a *worse* manifest.
+- **Root cause:** LS-1's `tabs_satisfied` only looked at `permissions`/`host_permissions`; Chrome's effective host set is `host_permissions ∪ content_scripts.matches`.
+- **Fix:** `tabs_satisfied` now also counts content-script match patterns (ported to canonical `Claude x LoveSpark/scripts/ls-check.py` as well, function-by-function per the fork rule). Regression test `test_perm_missing_accepts_content_script_hosts_without_tabs`. Version 0.1.2 → 0.1.3.
+- **Prevention:** The test pins the rule; any future "tabs required" heuristic must enumerate all three host-access sources.
