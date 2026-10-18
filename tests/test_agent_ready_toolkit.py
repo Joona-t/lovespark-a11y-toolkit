@@ -93,3 +93,29 @@ def test_integrations_exist_and_are_agent_safe():
     assert "ls-check" in text
     assert "ls-audit-contrast" in text
     assert "deterministic" in openclaw.read_text().lower()
+
+
+def test_perm_missing_accepts_activetab_without_tabs(tmp_path):
+    # KI-LS1 regression: chrome.tabs.query under `activeTab` (no broad `tabs`) is the
+    # privacy-correct pattern and must NOT be flagged PERM-MISSING. Guards the activeTab
+    # exemption in check_perm_missing against future drift from canonical.
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "manifest_version": 3,
+        "name": "demo",
+        "version": "1.0",
+        "permissions": ["activeTab"],
+        "action": {"default_popup": "popup.html"},
+    }))
+    (tmp_path / "popup.html").write_text("<main></main>")
+    (tmp_path / "popup.js").write_text("chrome.tabs.query({active: true}, () => {});")
+    result = run_cmd(sys.executable, "scripts/ls-check.py", str(tmp_path))
+    assert "'chrome.tabs.query' used but 'tabs'" not in result.stdout, result.stdout
+
+
+def test_ls_check_version_flag_emits_hash():
+    # The --version self-check must print a stable identity line with a sha256 so a
+    # stale install is detectable by comparing the installed hash to the latest build.
+    result = run_cmd(sys.executable, "scripts/ls-check.py", "--version")
+    assert result.returncode == 0
+    assert result.stdout.startswith("ls-check ")
+    assert "sha256:" in result.stdout
