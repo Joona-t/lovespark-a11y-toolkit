@@ -35,7 +35,7 @@ Flag any matches as KNOWN DANGEROUS PATTERNS before proceeding.
 Run the automated contrast checker with history tracking:
 
 ```
-python3 "/Users/darkfire/Claude x LoveSpark/scripts/audit-contrast.py" --verbose --history
+python3 ~/"Claude x LoveSpark"/scripts/audit-contrast.py --verbose --history
 ```
 
 Report results. If there are failures, list specific token fixes needed.

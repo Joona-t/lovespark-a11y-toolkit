@@ -110,7 +110,7 @@ Include keyboard navigation for all interactive patterns:
 Run the accessibility audit with history tracking:
 
 ```
-python3 "/Users/darkfire/Claude x LoveSpark/scripts/audit-contrast.py" --verbose --history
+python3 ~/"Claude x LoveSpark"/scripts/audit-contrast.py --verbose --history
 ```
 
 Then walk through the checklist from the framework (Section 9):
